@@ -1,65 +1,176 @@
-import Image from "next/image";
+"use client";
 
-export default function Home() {
+import { useState } from "react";
+import { useRouter } from "next/navigation";
+
+const S = {
+  page: {
+    minHeight: "100vh",
+    backgroundColor: "#0a0a0a",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: "24px",
+  } as React.CSSProperties,
+
+  card: {
+    backgroundColor: "#111111",
+    border: "1px solid #222222",
+    borderRadius: "20px",
+    padding: "48px 40px",
+    width: "100%",
+    maxWidth: "420px",
+    boxShadow: "0 25px 60px rgba(0,0,0,0.8)",
+  } as React.CSSProperties,
+
+  icon: {
+    width: "60px",
+    height: "60px",
+    borderRadius: "16px",
+    background: "linear-gradient(135deg,#3b82f6,#8b5cf6)",
+    margin: "0 auto 20px",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    fontSize: "28px",
+  } as React.CSSProperties,
+
+  title: {
+    fontSize: "28px",
+    fontWeight: "700",
+    color: "#ffffff",
+    textAlign: "center",
+    marginBottom: "8px",
+    letterSpacing: "-0.5px",
+  } as React.CSSProperties,
+
+  subtitle: {
+    fontSize: "14px",
+    color: "#6b7280",
+    textAlign: "center",
+    marginBottom: "36px",
+  } as React.CSSProperties,
+
+  input: {
+    width: "100%",
+    padding: "14px 16px",
+    backgroundColor: "#1a1a1a",
+    border: "1px solid #2a2a2a",
+    borderRadius: "12px",
+    color: "#ffffff",
+    fontSize: "15px",
+    outline: "none",
+    display: "block",
+    marginBottom: "12px",
+  } as React.CSSProperties,
+
+  inputError: {
+    width: "100%",
+    padding: "14px 16px",
+    backgroundColor: "#1a1a1a",
+    border: "1px solid #ef4444",
+    borderRadius: "12px",
+    color: "#ffffff",
+    fontSize: "15px",
+    outline: "none",
+    display: "block",
+    marginBottom: "12px",
+  } as React.CSSProperties,
+
+  button: {
+    width: "100%",
+    padding: "14px",
+    backgroundColor: "#2563eb",
+    border: "none",
+    borderRadius: "12px",
+    color: "#ffffff",
+    fontSize: "15px",
+    fontWeight: "600",
+    cursor: "pointer",
+    marginTop: "4px",
+  } as React.CSSProperties,
+
+  errorText: {
+    color: "#ef4444",
+    fontSize: "13px",
+    textAlign: "center",
+    marginBottom: "12px",
+  } as React.CSSProperties,
+
+  footer: {
+    color: "#374151",
+    fontSize: "12px",
+    textAlign: "center",
+    marginTop: "28px",
+  } as React.CSSProperties,
+};
+
+export default function LoginPage() {
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const router = useRouter();
+
+  const handleLogin = () => {
+    setLoading(true);
+    setTimeout(() => {
+      if (password === "jehova643") {
+        router.push("/dashboard");
+      } else {
+        setError(true);
+        setLoading(false);
+        setTimeout(() => setError(false), 2000);
+      }
+    }, 400);
+  };
+
   return (
-    <div className="flex flex-col flex-1 items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex flex-1 w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
+    <div style={S.page}>
+      <div style={S.card}>
+        <div style={S.icon}>🎭</div>
+        <h1 style={S.title}>Avatar Studio Pro</h1>
+        <p style={S.subtitle}>
+          Enter your access password to continue
+        </p>
+
+        <input
+          type="password"
+          placeholder="Enter password"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+          onKeyDown={(e) =>
+            e.key === "Enter" && handleLogin()
+          }
+          style={error ? S.inputError : S.input}
         />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the page.tsx file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
+
+        {error && (
+          <p style={S.errorText}>
+            Incorrect password. Try again.
           </p>
-        </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={16}
-            />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
-        </div>
-      </main>
+        )}
+
+        <button
+          onClick={handleLogin}
+          disabled={loading}
+          style={{
+            ...S.button,
+            backgroundColor: loading
+              ? "#1d4ed8"
+              : "#2563eb",
+            cursor: loading
+              ? "not-allowed"
+              : "pointer",
+            opacity: loading ? 0.8 : 1,
+          }}
+        >
+          {loading ? "Accessing..." : "Access Studio"}
+        </button>
+
+        <p style={S.footer}>
+          Avatar Studio Pro © 2026
+        </p>
+      </div>
     </div>
   );
 }

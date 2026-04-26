@@ -1,0 +1,22 @@
+{
+  "payments": [
+    {
+      "id": "1777181165291",
+      "crypto": "BTC",
+      "status": "approved",
+      "apiKey": "dct_bvcc_GoGTuNFttnlZZoDyFOaIvOSpABJqdngLtmhTKvYgNmOESCIZmnNgXzHTuvRaMKeu"
+    },
+    {
+      "id": "1777182258806",
+      "crypto": "BTC",
+      "status": "approved",
+      "apiKey": "dct_bvcc_GoGTuNFttnlZZoDyFOaIvOSpABJqdngLtmhTKvYgNmOESCIZmnNgXzHTuvRaMKem"
+    },
+    {
+      "id": "1777182440466",
+      "crypto": "SOL",
+      "status": "approved",
+      "apiKey": "dct_bvcc_GoGTuNFttnlZZoDyFOaIvOSpABJqdngLtmhTKvYgNmOESCIZmnNgXzHTuvRaMKeW"
+    }
+  ]
+}
