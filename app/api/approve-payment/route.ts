@@ -1,48 +1,59 @@
 import { NextResponse } from "next/server";
-import fs from "fs";
-import path from "path";
+import { Redis } from "@upstash/redis";
 
-const paymentsPath = path.join(
-  process.cwd(),
-  "data/payments.json"
-);
-const keysPath = path.join(
-  process.cwd(),
-  "data/api-keys.json"
-);
+const redis = new Redis({
+  url: process.env.UPSTASH_REDIS_REST_URL!,
+  token: process.env.UPSTASH_REDIS_REST_TOKEN!,
+});
 
 export async function POST(req: Request) {
-  const { paymentId } = await req.json();
+  try {
+    const { paymentId } = await req.json();
 
-  const payments = JSON.parse(
-    fs.readFileSync(paymentsPath, "utf-8")
-  );
-  const keys = JSON.parse(
-    fs.readFileSync(keysPath, "utf-8")
-  );
+    if (!paymentId) {
+      return NextResponse.json(
+        { error: "Missing paymentId" },
+        { status: 400 }
+      );
+    }
 
-  const payment = payments.payments.find(
-    (p: any) => p.id === paymentId
-  );
+    // Check payment exists
+    const payment = await redis.hgetall(
+      `payment:${paymentId}`
+    );
 
-  if (!payment)
-    return NextResponse.json({ error: "Not found" });
-  if (keys.available.length === 0)
-    return NextResponse.json({ error: "No keys available" });
+    if (!payment) {
+      return NextResponse.json(
+        { error: "Not found" },
+        { status: 404 }
+      );
+    }
 
-  const key = keys.available.shift();
-  keys.used.push(key);
-  payment.status = "approved";
-  payment.apiKey = key;
+    // Get next available key (same as keys.available.shift())
+    const key = await redis.lpop("keys:available");
 
-  fs.writeFileSync(
-    paymentsPath,
-    JSON.stringify(payments, null, 2)
-  );
-  fs.writeFileSync(
-    keysPath,
-    JSON.stringify(keys, null, 2)
-  );
+    if (!key) {
+      return NextResponse.json(
+        { error: "No keys available" },
+        { status: 400 }
+      );
+    }
 
-  return NextResponse.json({ success: true });
+    // Move key to used list (same as keys.used.push(key))
+    await redis.rpush("keys:used", key as string);
+
+    // Update payment (same as payment.status = "approved")
+    await redis.hset(`payment:${paymentId}`, {
+      status: "approved",
+      apiKey: key,
+    });
+
+    return NextResponse.json({ success: true });
+  } catch (error) {
+    console.error("Approve error:", error);
+    return NextResponse.json(
+      { error: "Internal server error" },
+      { status: 500 }
+    );
+  }
 }

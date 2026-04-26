@@ -1,13 +1,27 @@
 import { NextResponse } from "next/server";
-import fs from "fs";
-import path from "path";
+import { Redis } from "@upstash/redis";
+
+const redis = new Redis({
+  url: process.env.UPSTASH_REDIS_REST_URL!,
+  token: process.env.UPSTASH_REDIS_REST_TOKEN!,
+});
 
 export async function GET() {
-  const data = JSON.parse(
-    fs.readFileSync(
-      path.join(process.cwd(), "data/api-keys.json"),
-      "utf-8"
-    )
-  );
-  return NextResponse.json(data);
+  try {
+    // Same as reading api-keys.json { available: [], used: [] }
+    const available = await redis.lrange(
+      "keys:available",
+      0,
+      -1
+    );
+    const used = await redis.lrange("keys:used", 0, -1);
+
+    return NextResponse.json({ available, used });
+  } catch (error) {
+    console.error("Get keys error:", error);
+    return NextResponse.json(
+      { error: "Internal server error" },
+      { status: 500 }
+    );
+  }
 }
