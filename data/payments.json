@@ -17,6 +17,12 @@
       "crypto": "SOL",
       "status": "approved",
       "apiKey": "dct_bvcc_GoGTuNFttnlZZoDyFOaIvOSpABJqdngLtmhTKvYgNmOESCIZmnNgXzHTuvRaMKeW"
+    },
+    {
+      "id": "1777242725524",
+      "crypto": "BTC",
+      "status": "pending",
+      "apiKey": null
     }
   ]
 }

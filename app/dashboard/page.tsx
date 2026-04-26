@@ -150,9 +150,6 @@ No ghosting.
       setIsStreaming(true);
       setUsageSeconds(0);
 
-// ✅ Save API key for /live page
-localStorage.setItem("avatarApiKey", apiKey);
-
       if (lastAvatarFile) {
         await realtimeClient.set({
           prompt: stablePrompt,
@@ -207,7 +204,6 @@ localStorage.setItem("avatarApiKey", apiKey);
 
     reader.onloadend = async () => {
       setPreviewImage(reader.result as string);
-      
       if (!realtimeClientRef.current) return;
       await realtimeClientRef.current.set({
         prompt: stablePrompt,
