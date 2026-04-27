@@ -9,7 +9,6 @@ const redis = new Redis({
 export async function POST(req: Request) {
   try {
     const { key, list } = await req.json();
-    // list = "available" or "used"
 
     if (!key || !list) {
       return NextResponse.json(
@@ -20,26 +19,26 @@ export async function POST(req: Request) {
 
     if (list !== "available" && list !== "used") {
       return NextResponse.json(
-        { error: "list must be 'available' or 'used'" },
+        { error: "list must be available or used" },
         { status: 400 }
       );
     }
 
-    // Remove the key from whichever list it's in
+    // lrem removes all occurrences of the value from the list
     const removed = await redis.lrem(
       `keys:${list}`,
-      0,  // 0 = remove ALL occurrences
+      0,
       key
     );
 
     if (removed === 0) {
       return NextResponse.json(
-        { error: "Key not found in list" },
+        { error: "Key not found" },
         { status: 404 }
       );
     }
 
-    return NextResponse.json({ success: true, removed });
+    return NextResponse.json({ success: true });
   } catch (error) {
     console.error("Delete key error:", error);
     return NextResponse.json(
