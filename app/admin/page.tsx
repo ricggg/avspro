@@ -27,6 +27,7 @@ export default function AdminPage() {
   const [used, setUsed] = useState<string[]>([]);
   const [newKeys, setNewKeys] = useState("");
   const [loading, setLoading] = useState(false);
+  const [deletingKey, setDeletingKey] = useState<string | null>(null);
   const [msg, setMsg] = useState("");
 
   const login = async () => {
@@ -82,6 +83,38 @@ export default function AdminPage() {
     setTimeout(() => setMsg(""), 3000);
     loadData();
     setLoading(false);
+  };
+
+  const deleteKey = async (
+    key: string,
+    list: "available" | "used"
+  ) => {
+    const confirmDelete = window.confirm(
+      `Delete this key from ${list} list?\n\n${key}`
+    );
+    if (!confirmDelete) return;
+
+    setDeletingKey(`${list}:${key}`);
+    try {
+      const res = await fetch("/api/delete-key", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ key, list }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        setMsg(`✅ Key deleted from ${list} list.`);
+        setTimeout(() => setMsg(""), 3000);
+        loadData();
+      } else {
+        setMsg(`❌ ${data.error || "Failed to delete key"}`);
+        setTimeout(() => setMsg(""), 3000);
+      }
+    } catch {
+      setMsg("❌ Failed to delete key");
+      setTimeout(() => setMsg(""), 3000);
+    }
+    setDeletingKey(null);
   };
 
   useEffect(() => {
@@ -141,9 +174,7 @@ export default function AdminPage() {
             type="password"
             placeholder="Admin password"
             value={password}
-            onChange={(e) =>
-              setPassword(e.target.value)
-            }
+            onChange={(e) => setPassword(e.target.value)}
             onKeyDown={(e) =>
               e.key === "Enter" && login()
             }
@@ -215,13 +246,17 @@ export default function AdminPage() {
         {msg && (
           <div
             style={{
-              backgroundColor:
-                "rgba(74,222,128,0.1)",
-              border:
-                "1px solid rgba(74,222,128,0.3)",
+              backgroundColor: msg.startsWith("❌")
+                ? "rgba(239,68,68,0.1)"
+                : "rgba(74,222,128,0.1)",
+              border: msg.startsWith("❌")
+                ? "1px solid rgba(239,68,68,0.3)"
+                : "1px solid rgba(74,222,128,0.3)",
               borderRadius: "10px",
               padding: "12px 16px",
-              color: "#4ade80",
+              color: msg.startsWith("❌")
+                ? "#f87171"
+                : "#4ade80",
               fontSize: "14px",
             }}
           >
@@ -251,9 +286,7 @@ export default function AdminPage() {
           </p>
           <textarea
             value={newKeys}
-            onChange={(e) =>
-              setNewKeys(e.target.value)
-            }
+            onChange={(e) => setNewKeys(e.target.value)}
             placeholder="dct_key1, dct_key2, dct_key3"
             rows={4}
             style={{
@@ -283,7 +316,7 @@ export default function AdminPage() {
             gap: "16px",
           }}
         >
-          {/* Available */}
+          {/* Available Keys */}
           <div style={cardStyle}>
             <h2
               style={{
@@ -297,7 +330,7 @@ export default function AdminPage() {
             </h2>
             <div
               style={{
-                maxHeight: "200px",
+                maxHeight: "300px",
                 overflowY: "auto",
                 display: "flex",
                 flexDirection: "column",
@@ -321,21 +354,59 @@ export default function AdminPage() {
                       backgroundColor: "#1a1a1a",
                       border: "1px solid #2a2a2a",
                       borderRadius: "8px",
-                      padding: "8px 12px",
-                      fontSize: "11px",
-                      fontFamily: "monospace",
-                      color: "#d1d5db",
-                      wordBreak: "break-all",
+                      padding: "8px 10px",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "space-between",
+                      gap: "8px",
                     }}
                   >
-                    {k}
+                    <span
+                      style={{
+                        fontSize: "11px",
+                        fontFamily: "monospace",
+                        color: "#d1d5db",
+                        wordBreak: "break-all",
+                        flex: 1,
+                      }}
+                    >
+                      {k}
+                    </span>
+                    <button
+                      onClick={() =>
+                        deleteKey(k, "available")
+                      }
+                      disabled={
+                        deletingKey === `available:${k}`
+                      }
+                      style={{
+                        backgroundColor: "#7f1d1d",
+                        border: "none",
+                        borderRadius: "6px",
+                        color: "#fca5a5",
+                        fontSize: "11px",
+                        fontWeight: "500",
+                        padding: "4px 8px",
+                        cursor: "pointer",
+                        flexShrink: 0,
+                        opacity:
+                          deletingKey === `available:${k}`
+                            ? 0.5
+                            : 1,
+                        whiteSpace: "nowrap",
+                      }}
+                    >
+                      {deletingKey === `available:${k}`
+                        ? "..."
+                        : "🗑 Delete"}
+                    </button>
                   </div>
                 ))
               )}
             </div>
           </div>
 
-          {/* Used */}
+          {/* Used Keys */}
           <div style={cardStyle}>
             <h2
               style={{
@@ -349,7 +420,7 @@ export default function AdminPage() {
             </h2>
             <div
               style={{
-                maxHeight: "200px",
+                maxHeight: "300px",
                 overflowY: "auto",
                 display: "flex",
                 flexDirection: "column",
@@ -373,14 +444,52 @@ export default function AdminPage() {
                       backgroundColor: "#1a1a1a",
                       border: "1px solid #2a2a2a",
                       borderRadius: "8px",
-                      padding: "8px 12px",
-                      fontSize: "11px",
-                      fontFamily: "monospace",
-                      color: "#6b7280",
-                      wordBreak: "break-all",
+                      padding: "8px 10px",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "space-between",
+                      gap: "8px",
                     }}
                   >
-                    {k}
+                    <span
+                      style={{
+                        fontSize: "11px",
+                        fontFamily: "monospace",
+                        color: "#6b7280",
+                        wordBreak: "break-all",
+                        flex: 1,
+                      }}
+                    >
+                      {k}
+                    </span>
+                    <button
+                      onClick={() =>
+                        deleteKey(k, "used")
+                      }
+                      disabled={
+                        deletingKey === `used:${k}`
+                      }
+                      style={{
+                        backgroundColor: "#7f1d1d",
+                        border: "none",
+                        borderRadius: "6px",
+                        color: "#fca5a5",
+                        fontSize: "11px",
+                        fontWeight: "500",
+                        padding: "4px 8px",
+                        cursor: "pointer",
+                        flexShrink: 0,
+                        opacity:
+                          deletingKey === `used:${k}`
+                            ? 0.5
+                            : 1,
+                        whiteSpace: "nowrap",
+                      }}
+                    >
+                      {deletingKey === `used:${k}`
+                        ? "..."
+                        : "🗑 Delete"}
+                    </button>
                   </div>
                 ))
               )}
@@ -417,7 +526,7 @@ export default function AdminPage() {
                 gap: "12px",
               }}
             >
-              {payments.map((p) => (
+              {[...payments].reverse().map((p) => (
                 <div
                   key={p.id}
                   style={{
@@ -426,8 +535,7 @@ export default function AdminPage() {
                     borderRadius: "12px",
                     padding: "16px",
                     display: "flex",
-                    justifyContent:
-                      "space-between",
+                    justifyContent: "space-between",
                     alignItems: "center",
                     flexWrap: "wrap",
                     gap: "12px",
