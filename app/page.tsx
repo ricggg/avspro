@@ -62,6 +62,7 @@ const S = {
     outline: "none",
     display: "block",
     marginBottom: "12px",
+    boxSizing: "border-box",
   } as React.CSSProperties,
 
   inputError: {
@@ -75,6 +76,7 @@ const S = {
     outline: "none",
     display: "block",
     marginBottom: "12px",
+    boxSizing: "border-box",
   } as React.CSSProperties,
 
   button: {
@@ -106,22 +108,36 @@ const S = {
 };
 
 export default function LoginPage() {
-  const [password, setPassword] = useState("");
-  const [error, setError] = useState(false);
+  const [code, setCode] = useState("");
+  const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const router = useRouter();
 
-  const handleLogin = () => {
+  const handleLogin = async () => {
+    if (!code.trim()) return;
     setLoading(true);
-    setTimeout(() => {
-      if (password === "jehova643") {
+    setError("");
+
+    try {
+      const res = await fetch("/api/verify-access", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ code: code.trim() }),
+      });
+      const data = await res.json();
+
+      if (data.success) {
+        // Cookie is set by the API route
         router.push("/dashboard");
       } else {
-        setError(true);
+        setError(data.error || "Invalid access code.");
         setLoading(false);
-        setTimeout(() => setError(false), 2000);
+        setTimeout(() => setError(""), 3000);
       }
-    }, 400);
+    } catch {
+      setError("Connection error. Try again.");
+      setLoading(false);
+    }
   };
 
   return (
@@ -129,47 +145,34 @@ export default function LoginPage() {
       <div style={S.card}>
         <div style={S.icon}>🎭</div>
         <h1 style={S.title}>Avatar Studio Pro</h1>
-        <p style={S.subtitle}>
-          Enter your access password to continue
-        </p>
+        <p style={S.subtitle}>Enter your access code to continue</p>
 
         <input
-          type="password"
-          placeholder="Enter password"
-          value={password}
-          onChange={(e) => setPassword(e.target.value)}
-          onKeyDown={(e) =>
-            e.key === "Enter" && handleLogin()
-          }
+          type="text"
+          placeholder="Enter access code"
+          value={code}
+          onChange={(e) => setCode(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && handleLogin()}
           style={error ? S.inputError : S.input}
+          autoComplete="off"
         />
 
-        {error && (
-          <p style={S.errorText}>
-            Incorrect password. Try again.
-          </p>
-        )}
+        {error && <p style={S.errorText}>{error}</p>}
 
         <button
           onClick={handleLogin}
           disabled={loading}
           style={{
             ...S.button,
-            backgroundColor: loading
-              ? "#1d4ed8"
-              : "#2563eb",
-            cursor: loading
-              ? "not-allowed"
-              : "pointer",
+            backgroundColor: loading ? "#1d4ed8" : "#2563eb",
+            cursor: loading ? "not-allowed" : "pointer",
             opacity: loading ? 0.8 : 1,
           }}
         >
-          {loading ? "Accessing..." : "Access Studio"}
+          {loading ? "Verifying..." : "Access Studio"}
         </button>
 
-        <p style={S.footer}>
-          Avatar Studio Pro © 2026
-        </p>
+        <p style={S.footer}>Avatar Studio Pro © 2026</p>
       </div>
     </div>
   );

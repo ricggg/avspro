@@ -6,49 +6,78 @@ const redis = new Redis({
   token: process.env.UPSTASH_REDIS_REST_TOKEN!,
 });
 
+function generateId(): string {
+  return Date.now().toString();
+}
+
+function generateTransactionId(): string {
+  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+  let result = "TXN-";
+  for (let i = 0; i < 12; i++) {
+    result += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return result;
+}
+
 export async function POST(req: Request) {
   try {
-    const { crypto } = await req.json();
+    const { crypto, minutes, accessCode, price } = await req.json();
 
-    if (!crypto) {
-      return NextResponse.json(
-        { error: "Missing crypto" },
-        { status: 400 }
-      );
-    }
+    const paymentId = generateId();
+    const transactionId = generateTransactionId();
+    const now = new Date();
 
-    const paymentId = Date.now().toString();
-
-    // Save payment — same data shape as your JSON file
+    // Save to Redis
     await redis.hset(`payment:${paymentId}`, {
       id: paymentId,
+      transactionId,
       crypto,
+      minutes: String(minutes),
+      price: price || "",
+      accessCode: accessCode || "guest",
       status: "pending",
-      apiKey: null,
+      createdAt: now.toISOString(),
+      createdAtReadable: now.toLocaleString(),
     });
 
-    // Keep a list of all payment IDs (same as your payments array)
+    // Track all payments
     await redis.rpush("payments:all", paymentId);
 
-    // Send Telegram notification — exactly as before
-    await fetch(
-      `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`,
-      {
+    // Send Telegram notification
+    const botToken = process.env.TELEGRAM_BOT_TOKEN;
+    const chatId = process.env.TELEGRAM_CHAT_ID;
+
+    if (botToken && chatId) {
+      const message = [
+        `🛒 <b>NEW PURCHASE REQUEST</b>`,
+        ``,
+        `👤 <b>Account:</b> <code>${accessCode || "guest"}</code>`,
+        `📦 <b>Package:</b> ${minutes} Minutes`,
+        `💰 <b>Price:</b> ${price}`,
+        `💎 <b>Crypto:</b> ${crypto}`,
+        ``,
+        `🔖 <b>Payment ID:</b> <code>${paymentId}</code>`,
+        `🔗 <b>Transaction ID:</b> <code>${transactionId}</code>`,
+        ``,
+        `🕐 <b>Time:</b> ${now.toLocaleString()}`,
+        ``,
+        `⏳ <i>Waiting for payment confirmation...</i>`,
+      ].join("\n");
+
+      await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          chat_id: process.env.TELEGRAM_CHAT_ID,
-          text: `💰 New Payment\nCrypto: ${crypto}\nID: ${paymentId}`,
+          chat_id: chatId,
+          text: message,
+          parse_mode: "HTML",
         }),
-      }
-    ).catch(() => {});
+      }).catch(() => {});
+    }
 
-    return NextResponse.json({ success: true, paymentId });
+    return NextResponse.json({ paymentId, transactionId });
   } catch (error) {
     console.error("Notify error:", error);
-    return NextResponse.json(
-      { error: "Internal server error" },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: "Server error" }, { status: 500 });
   }
 }

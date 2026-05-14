@@ -1,32 +1,12 @@
 "use client";
 
-import { useRef, useState, useEffect } from "react";
+import { useRef, useState, useEffect, useCallback } from "react";
 import { createDecartClient, models } from "@decartai/sdk";
 import { useRouter } from "next/navigation";
 
-export default function Dashboard() {
-  const videoRef = useRef<HTMLVideoElement>(null);
-  const realtimeClientRef = useRef<any>(null);
-  const streamRef = useRef<MediaStream | null>(null);
-  const router = useRouter();
+const KEY_DURATION_SECONDS = 492;
 
-  const [apiKey, setApiKey] = useState("");
-  const [apiInput, setApiInput] = useState("");
-  const [showApiModal, setShowApiModal] = useState(true);
-  const [isStreaming, setIsStreaming] = useState(false);
-  const [isLoading, setIsLoading] = useState(false);
-  const [cameraReady, setCameraReady] = useState(false);
-  const [cameraError, setCameraError] = useState("");
-  const [usageSeconds, setUsageSeconds] = useState(0);
-  const [previewImage, setPreviewImage] = useState<
-    string | null
-  >(null);
-  const [lastAvatarFile, setLastAvatarFile] =
-    useState<File | null>(null);
-  const [errorMsg, setErrorMsg] = useState("");
-  const [showError, setShowError] = useState(false);
-
-  const stablePrompt = `
+const stablePrompt = `
 Exact identity replication.
 Strictly match the reference image.
 Photorealistic human.
@@ -34,647 +14,726 @@ Stable motion.
 No ghosting.
 `;
 
+interface TokenInfo {
+  totalSeconds: number;
+  usedSeconds: number;
+  keys: string[];
+  tokenId: string;
+  issuedAt: number;
+}
+
+function formatTime(s: number) {
+  const m = Math.floor(s / 60);
+  const sec = s % 60;
+  return `${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}`;
+}
+
+function btnStyle(bg: string, border?: string): React.CSSProperties {
+  return {
+    backgroundColor: bg,
+    border: border ? `1px solid ${border}` : "none",
+    borderRadius: "8px",
+    color: "#ffffff",
+    fontSize: "12px",
+    fontWeight: "500",
+    padding: "8px 14px",
+    cursor: "pointer",
+    whiteSpace: "nowrap" as const,
+  };
+}
+
+export default function Dashboard() {
+  const router = useRouter();
+
+  // Raw cam — always display:none, user never sees this element directly
+  const rawVideoRef = useRef<HTMLVideoElement>(null);
+
+  // Avatar stream — always display:none, feeds into canvas only
+  const avatarVideoRef = useRef<HTMLVideoElement>(null);
+
+  // The ONLY thing user ever sees
+  const displayCanvasRef = useRef<HTMLCanvasElement>(null);
+
+  // Avatar render loop (during streaming)
+  const rafRef = useRef<number | null>(null);
+
+  // Raw cam render loop (before start and after stop)
+  const rawDrawRafRef = useRef<number | null>(null);
+
+  // Last good avatar frame — always has something to show on network lag
+  const lastGoodFrameRef = useRef<ImageData | null>(null);
+
+  const realtimeClientRef = useRef<any>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+
+  const [tokenInput, setTokenInput] = useState("");
+  const [tokenInfo, setTokenInfo] = useState<TokenInfo | null>(null);
+  const [showTokenModal, setShowTokenModal] = useState(true);
+  const [isStreaming, setIsStreaming] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
+  const [cameraReady, setCameraReady] = useState(false);
+  const [cameraError, setCameraError] = useState("");
+  const [usedSeconds, setUsedSeconds] = useState(0);
+  const [previewImage, setPreviewImage] = useState<string | null>(null);
+  const [lastAvatarFile, setLastAvatarFile] = useState<File | null>(null);
+  const [errorMsg, setErrorMsg] = useState("");
+  const [showError, setShowError] = useState(false);
+
+  const isStreamingRef = useRef(false);
+  const usedSecondsRef = useRef(0);
+  const currentKeyIndexRef = useRef(0);
+  const keyStartSecondRef = useRef(0);
+  const tokenInfoRef = useRef<TokenInfo | null>(null);
+  const switchingRef = useRef(false);
+  const avatarActiveRef = useRef(false);
+
+  // ── Raw Cam Canvas Loop ──────────────────────────────────────────────────
+  // Used before start and after stop — draws raw cam through canvas safely
+  const startRawCamLoop = useCallback(() => {
+    // Cancel any existing raw loop first
+    if (rawDrawRafRef.current) {
+      cancelAnimationFrame(rawDrawRafRef.current);
+      rawDrawRafRef.current = null;
+    }
+
+    const canvas = displayCanvasRef.current;
+    const rawVideo = rawVideoRef.current;
+    if (!canvas || !rawVideo) return;
+
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+
+    const drawRaw = () => {
+      // Stop if streaming started — avatar loop takes over
+      if (isStreamingRef.current) return;
+
+      if (rawVideo.readyState >= 2 && rawVideo.videoWidth > 0) {
+        canvas.width = rawVideo.videoWidth;
+        canvas.height = rawVideo.videoHeight;
+        ctx.drawImage(rawVideo, 0, 0, canvas.width, canvas.height);
+      }
+
+      rawDrawRafRef.current = requestAnimationFrame(drawRaw);
+    };
+
+    rawDrawRafRef.current = requestAnimationFrame(drawRaw);
+  }, []);
+
+  const stopRawCamLoop = useCallback(() => {
+    if (rawDrawRafRef.current) {
+      cancelAnimationFrame(rawDrawRafRef.current);
+      rawDrawRafRef.current = null;
+    }
+  }, []);
+
+  // ── Avatar Canvas Render Loop ────────────────────────────────────────────
+  // Runs during streaming — only ever draws avatar frames
+  // On lag/switch — draws last good frame instead (never raw cam)
+  const startRenderLoop = useCallback(() => {
+    if (rafRef.current) {
+      cancelAnimationFrame(rafRef.current);
+      rafRef.current = null;
+    }
+
+    const canvas = displayCanvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+
+    const render = () => {
+      if (!isStreamingRef.current) return;
+
+      const avatarVideo = avatarVideoRef.current;
+
+      if (
+        avatarActiveRef.current &&
+        avatarVideo &&
+        avatarVideo.readyState >= 2 &&
+        avatarVideo.videoWidth > 0 &&
+        !avatarVideo.paused &&
+        !avatarVideo.ended
+      ) {
+        // Avatar is live and healthy — draw it
+        canvas.width = avatarVideo.videoWidth || 1280;
+        canvas.height = avatarVideo.videoHeight || 720;
+        ctx.drawImage(avatarVideo, 0, 0, canvas.width, canvas.height);
+
+        // Save as last good frame for lag/switch protection
+        try {
+          lastGoodFrameRef.current = ctx.getImageData(
+            0, 0, canvas.width, canvas.height
+          );
+        } catch {}
+
+      } else if (lastGoodFrameRef.current) {
+        // Network lag / key switch / SDK reset
+        // Show last good avatar frame — raw cam has NO path here
+        ctx.putImageData(lastGoodFrameRef.current, 0, 0);
+
+      } else {
+        // No avatar frame captured yet — show black while connecting
+        ctx.fillStyle = "#000000";
+        ctx.fillRect(0, 0, canvas.width || 1280, canvas.height || 720);
+      }
+
+      rafRef.current = requestAnimationFrame(render);
+    };
+
+    rafRef.current = requestAnimationFrame(render);
+  }, []);
+
+  const stopRenderLoop = useCallback(() => {
+    if (rafRef.current) {
+      cancelAnimationFrame(rafRef.current);
+      rafRef.current = null;
+    }
+  }, []);
+
+  // ── Camera ───────────────────────────────────────────────────────────────
   const acquireCamera = async () => {
     setCameraError("");
     setCameraReady(false);
+    stopRawCamLoop();
 
     if (streamRef.current) {
-      streamRef.current
-        .getTracks()
-        .forEach((t) => {
-          try { t.stop(); } catch {}
-        });
+      streamRef.current.getTracks().forEach(t => { try { t.stop(); } catch {} });
       streamRef.current = null;
     }
 
-    if (videoRef.current) {
-      videoRef.current.srcObject = null;
-    }
+    if (rawVideoRef.current) rawVideoRef.current.srcObject = null;
 
-    await new Promise((r) => setTimeout(r, 800));
+    await new Promise(r => setTimeout(r, 600));
 
     try {
-      const stream =
-        await navigator.mediaDevices.getUserMedia({
-          video: true,
-        });
-
+      const stream = await navigator.mediaDevices.getUserMedia({ video: true });
       streamRef.current = stream;
 
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
+      // Raw cam → hidden video element only
+      if (rawVideoRef.current) {
+        rawVideoRef.current.srcObject = stream;
+        // Wait for video to be ready then start raw cam loop
+        rawVideoRef.current.onloadedmetadata = () => {
+          if (!isStreamingRef.current) {
+            startRawCamLoop();
+          }
+        };
       }
 
       setCameraReady(true);
     } catch (err: any) {
       setCameraError(
-        `Camera unavailable (${err?.name}). Close Zoom, OBS, Teams then click Retry.`
+        `Camera unavailable (${err?.name}). Close Zoom, OBS, Teams then retry.`
       );
     }
   };
 
   useEffect(() => {
     acquireCamera();
-
     return () => {
-      if (streamRef.current) {
-        streamRef.current
-          .getTracks()
-          .forEach((t) => {
-            try { t.stop(); } catch {}
-          });
-      }
+      stopRenderLoop();
+      stopRawCamLoop();
+      streamRef.current?.getTracks().forEach(t => { try { t.stop(); } catch {} });
     };
   }, []);
 
-  useEffect(() => {
-    let interval: NodeJS.Timeout;
+  // ── Token ────────────────────────────────────────────────────────────────
+  const saveToken = async () => {
+    const raw = tokenInput.trim();
+    if (!raw) { showErr("Please enter your streaming token."); return; }
 
-    if (isStreaming) {
-      interval = setInterval(
-        () => setUsageSeconds((p) => p + 1),
-        1000
-      );
+    try {
+      const res = await fetch("/api/validate-token", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token: raw }),
+      });
+
+      const data = await res.json();
+
+      if (!data.valid) {
+        showErr(data.error || "Invalid or expired streaming token.");
+        return;
+      }
+
+      const info: TokenInfo = data.tokenInfo;
+
+      if (!info || !info.keys || info.keys.length === 0) {
+        showErr("Token has no API keys assigned. Contact admin.");
+        return;
+      }
+
+      setTokenInfo(info);
+      tokenInfoRef.current = info;
+      setUsedSeconds(info.usedSeconds);
+      usedSecondsRef.current = info.usedSeconds;
+      currentKeyIndexRef.current = 0;
+      setShowTokenModal(false);
+
+    } catch {
+      showErr("Token validation failed. Try again.");
     }
+  };
+
+  // ── Connect With Key ─────────────────────────────────────────────────────
+  const connectWithKey = async (keyIndex: number): Promise<boolean> => {
+    const info = tokenInfoRef.current;
+    if (!info || keyIndex >= info.keys.length) return false;
+    if (!streamRef.current || !cameraReady) return false;
+
+    try {
+      avatarActiveRef.current = false;
+      const apiKey = info.keys[keyIndex];
+
+      const client = createDecartClient({ apiKey });
+      const realtimeClient = await client.realtime.connect(streamRef.current, {
+        model: models.realtime("lucy-2.1"),
+        onRemoteStream: (editedStream: MediaStream) => {
+          if (!isStreamingRef.current) return;
+
+          // Feed avatar into hidden video — never shown directly
+          if (avatarVideoRef.current) {
+            avatarVideoRef.current.srcObject = editedStream;
+            avatarVideoRef.current.play().catch(() => {});
+          }
+
+          // Mark active — render loop now draws avatar instead of last frame
+          avatarActiveRef.current = true;
+        },
+      });
+
+      realtimeClientRef.current = realtimeClient;
+
+      if (lastAvatarFile) {
+        await realtimeClient.set({ prompt: stablePrompt, image: lastAvatarFile });
+      }
+
+      return true;
+    } catch (err) {
+      console.error("connectWithKey error:", err);
+      return false;
+    }
+  };
+
+  // ── Time Exhausted ───────────────────────────────────────────────────────
+  const handleTimeExhausted = async () => {
+    isStreamingRef.current = false;
+    avatarActiveRef.current = false;
+    stopRenderLoop();
+    setIsStreaming(false);
+
+    try { await realtimeClientRef.current?.disconnect(); } catch {}
+    realtimeClientRef.current = null;
+
+    if (avatarVideoRef.current) {
+      avatarVideoRef.current.srcObject = null;
+    }
+
+    // Show last good avatar frame — frozen avatar on exhaustion
+    const canvas = displayCanvasRef.current;
+    if (canvas && lastGoodFrameRef.current) {
+      const ctx = canvas.getContext("2d");
+      if (ctx) {
+        ctx.putImageData(lastGoodFrameRef.current, 0, 0);
+      }
+    }
+
+    await fetch("/api/update-token-usage", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        tokenId: tokenInfoRef.current?.tokenId,
+        usedSeconds: usedSecondsRef.current,
+      }),
+    }).catch(() => {});
+
+    showErr("Your streaming time has been fully used. Purchase more time to continue.");
+  };
+
+  // ── Key Rotation ─────────────────────────────────────────────────────────
+  const rotateToNextKey = async () => {
+    if (switchingRef.current) return;
+    switchingRef.current = true;
+
+    const info = tokenInfoRef.current;
+    if (!info) { switchingRef.current = false; return; }
+
+    const nextIndex = currentKeyIndexRef.current + 1;
+
+    if (nextIndex >= info.keys.length) {
+      switchingRef.current = false;
+      await handleTimeExhausted();
+      return;
+    }
+
+    // Mark avatar inactive — render loop shows last good frame during switch
+    avatarActiveRef.current = false;
+
+    await fetch("/api/mark-key-used", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        tokenId: info.tokenId,
+        keyIndex: currentKeyIndexRef.current,
+      }),
+    }).catch(() => {});
+
+    try { await realtimeClientRef.current?.disconnect(); } catch {}
+    realtimeClientRef.current = null;
+
+    if (avatarVideoRef.current) {
+      avatarVideoRef.current.srcObject = null;
+    }
+
+    await new Promise(r => setTimeout(r, 400));
+
+    currentKeyIndexRef.current = nextIndex;
+    keyStartSecondRef.current = nextIndex * KEY_DURATION_SECONDS;
+
+    const success = await connectWithKey(nextIndex);
+    if (!success) {
+      await handleTimeExhausted();
+    }
+
+    switchingRef.current = false;
+  };
+
+  // ── Timer ────────────────────────────────────────────────────────────────
+  useEffect(() => {
+    if (!isStreaming) return;
+
+    const interval = setInterval(async () => {
+      if (!isStreamingRef.current) return;
+
+      usedSecondsRef.current += 1;
+      setUsedSeconds(usedSecondsRef.current);
+
+      const info = tokenInfoRef.current;
+      if (!info) return;
+
+      if (usedSecondsRef.current >= info.totalSeconds) {
+        clearInterval(interval);
+        await handleTimeExhausted();
+        return;
+      }
+
+      const keyElapsed = usedSecondsRef.current - keyStartSecondRef.current;
+      if (keyElapsed >= KEY_DURATION_SECONDS && !switchingRef.current) {
+        await rotateToNextKey();
+      }
+    }, 1000);
 
     return () => clearInterval(interval);
   }, [isStreaming]);
 
-  const formatTime = (s: number) => {
-    const m = Math.floor(s / 60);
-    const sec = s % 60;
-    return `${String(m).padStart(2, "0")}:${String(
-      sec
-    ).padStart(2, "0")}`;
-  };
-
-  const showErr = (msg: string) => {
-    setErrorMsg(msg);
-    setShowError(true);
-  };
-
+  // ── Start ────────────────────────────────────────────────────────────────
   const startStreaming = async () => {
-    if (!apiKey) {
-      setShowApiModal(true);
-      return;
-    }
+    if (!tokenInfo) { setShowTokenModal(true); return; }
     if (isStreaming || isLoading) return;
-    if (!streamRef.current || !cameraReady) {
-      showErr("Camera not ready.");
+    if (!streamRef.current || !cameraReady) { showErr("Camera not ready."); return; }
+
+    const remaining = tokenInfo.totalSeconds - usedSeconds;
+    if (remaining <= 0) {
+      showErr("No streaming time remaining. Please purchase more.");
       return;
     }
+
+    // Stop raw cam loop FIRST before anything else
+    stopRawCamLoop();
 
     setIsLoading(true);
 
-    try {
-      const model = models.realtime("lucy-2.1");
-      const client = createDecartClient({ apiKey });
+    // Clear last good frame so connecting shows black not stale avatar
+    lastGoodFrameRef.current = null;
+    avatarActiveRef.current = false;
 
-      const realtimeClient =
-        await client.realtime.connect(
-          streamRef.current,
-          {
-            model,
-            onRemoteStream: (
-              editedStream: MediaStream
-            ) => {
-              if (videoRef.current) {
-                videoRef.current.srcObject =
-                  editedStream;
-              }
-            },
-          }
-        );
+    const startIndex = Math.min(
+      Math.floor(usedSeconds / KEY_DURATION_SECONDS),
+      tokenInfo.keys.length - 1
+    );
+    currentKeyIndexRef.current = startIndex;
+    keyStartSecondRef.current = startIndex * KEY_DURATION_SECONDS;
+    isStreamingRef.current = true;
 
-      realtimeClientRef.current = realtimeClient;
+    // Start avatar render loop — shows black until avatar arrives
+    startRenderLoop();
+
+    const success = await connectWithKey(startIndex);
+
+    if (success) {
       setIsStreaming(true);
-      setUsageSeconds(0);
-
-      if (lastAvatarFile) {
-        await realtimeClient.set({
-          prompt: stablePrompt,
-          image: lastAvatarFile,
-        });
-      }
-    } catch (err: any) {
-      const msg = (err?.message || "").toLowerCase();
-
-      if (msg.includes("insufficient")) {
-        showErr(
-          "Credits exhausted. Buy more API credits."
-        );
-      } else if (
-        msg.includes("unauthorized") ||
-        msg.includes("invalid") ||
-        msg.includes("forbidden")
-      ) {
-        showErr(
-          "Invalid API key. Check your key."
-        );
-      } else {
-        showErr(
-          `Connection failed: ${
-            err?.message || "Unknown"
-          }`
-        );
-      }
-    } finally {
       setIsLoading(false);
+    } else {
+      isStreamingRef.current = false;
+      avatarActiveRef.current = false;
+      stopRenderLoop();
+      setIsLoading(false);
+      // Failed — go back to showing raw cam
+      startRawCamLoop();
+      showErr("Failed to connect. API key may be invalid or exhausted.");
     }
   };
 
+  // ── Stop ─────────────────────────────────────────────────────────────────
   const stopStreaming = async () => {
-    try {
-      await realtimeClientRef.current?.disconnect();
-    } catch {}
+    isStreamingRef.current = false;
+    avatarActiveRef.current = false;
+    setIsStreaming(false);
+    stopRenderLoop();
 
+    try { await realtimeClientRef.current?.disconnect(); } catch {}
     realtimeClientRef.current = null;
 
-    if (videoRef.current && streamRef.current) {
-      videoRef.current.srcObject = streamRef.current;
+    if (avatarVideoRef.current) {
+      avatarVideoRef.current.srcObject = null;
     }
 
-    setIsStreaming(false);
-    setUsageSeconds(0);
+    // After stop — show raw cam again through canvas safely
+    startRawCamLoop();
+
+    await fetch("/api/update-token-usage", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        tokenId: tokenInfoRef.current?.tokenId,
+        usedSeconds: usedSecondsRef.current,
+      }),
+    }).catch(() => {});
   };
 
+  // ── Image Upload ─────────────────────────────────────────────────────────
   const handleImageUpload = async (file: File) => {
     setLastAvatarFile(file);
     const reader = new FileReader();
-
     reader.onloadend = async () => {
       setPreviewImage(reader.result as string);
       if (!realtimeClientRef.current) return;
-      await realtimeClientRef.current.set({
-        prompt: stablePrompt,
-        image: file,
-      });
+      await realtimeClientRef.current.set({ prompt: stablePrompt, image: file });
     };
-
     reader.readAsDataURL(file);
   };
 
-  const saveApiKey = () => {
-    if (!apiInput || apiInput.trim().length < 10) {
-      showErr("Please enter a valid API key.");
-      return;
-    }
-    setApiKey(apiInput.trim());
-    setShowApiModal(false);
-  };
+  const showErr = (msg: string) => { setErrorMsg(msg); setShowError(true); };
 
+  const totalSec = tokenInfo?.totalSeconds ?? 0;
+  const remainingSec = Math.max(0, totalSec - usedSeconds);
+  const progressPct = totalSec > 0 ? (usedSeconds / totalSec) * 100 : 0;
+
+  // ── RENDER ───────────────────────────────────────────────────────────────
   return (
-    <div
-      style={{
-        minHeight: "100vh",
-        backgroundColor: "#0a0a0a",
-        color: "#ffffff",
-        display: "flex",
-        flexDirection: "column",
-      }}
-    >
+    <div style={{ minHeight: "100vh", backgroundColor: "#0a0a0a", color: "#ffffff", display: "flex", flexDirection: "column" }}>
+
+      {/* HIDDEN ELEMENTS — physically invisible, user can never see */}
+      <video
+        ref={rawVideoRef}
+        autoPlay
+        playsInline
+        muted
+        style={{ display: "none", position: "absolute", pointerEvents: "none" }}
+      />
+      <video
+        ref={avatarVideoRef}
+        autoPlay
+        playsInline
+        muted
+        style={{ display: "none", position: "absolute", pointerEvents: "none" }}
+      />
+
       {/* TOP BAR */}
-      <div
-        style={{
-          backgroundColor: "#111111",
-          borderBottom: "1px solid #222222",
-          padding: "12px 20px",
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          flexWrap: "wrap",
-          gap: "12px",
-        }}
-      >
-        <span
-          style={{
-            fontSize: "16px",
-            fontWeight: "700",
-            color: "#ffffff",
-            letterSpacing: "-0.3px",
-          }}
-        >
+      <div style={{ backgroundColor: "#111111", borderBottom: "1px solid #222222", padding: "12px 20px", display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: "12px" }}>
+        <span style={{ fontSize: "16px", fontWeight: "700", color: "#ffffff" }}>
           🎭 Avatar Studio Pro
         </span>
 
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: "8px",
-            flexWrap: "wrap",
-          }}
-        >
-          {isStreaming && (
-            <span
-              style={{
-                fontSize: "12px",
-                color: "#4ade80",
-                backgroundColor: "rgba(74,222,128,0.1)",
-                border: "1px solid rgba(74,222,128,0.3)",
-                padding: "4px 12px",
-                borderRadius: "999px",
-                fontFamily: "monospace",
-              }}
-            >
-              ⏱ {formatTime(usageSeconds)}
-            </span>
+        <div style={{ display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" }}>
+          {tokenInfo && (
+            <div style={{ display: "flex", alignItems: "center", gap: "6px", backgroundColor: "#1a1a1a", border: "1px solid #2a2a2a", borderRadius: "8px", padding: "6px 12px" }}>
+              {isStreaming && (
+                <span style={{ width: "6px", height: "6px", borderRadius: "50%", backgroundColor: "#4ade80", display: "inline-block", animation: "pulse 1s infinite" }} />
+              )}
+              <span style={{ fontSize: "11px", fontFamily: "monospace", color: isStreaming ? "#4ade80" : "#9ca3af" }}>
+                {isStreaming ? "LIVE " : ""}{formatTime(usedSeconds)} / {formatTime(totalSec)}
+              </span>
+              <span style={{ fontSize: "11px", color: remainingSec < 60 ? "#f87171" : "#6b7280", fontFamily: "monospace" }}>
+                ({formatTime(remainingSec)} left)
+              </span>
+            </div>
           )}
 
-          <button
-            onClick={() => setShowApiModal(true)}
-            style={btnStyle("#1f1f1f", "#333")}
-          >
-            API Key
+          <button onClick={() => setShowTokenModal(true)} style={btnStyle("#1f1f1f", "#333")}>
+            {tokenInfo ? "Token ✓" : "Enter Token"}
           </button>
 
-          <button
-            onClick={() => router.push("/buy")}
-            style={btnStyle("#1d4ed8")}
-          >
-            Buy API
-          </button>
-
-          <button
-            onClick={() => router.push("/live")}
-            style={btnStyle("#7c3aed")}
-          >
-            Live Mode
+          <button onClick={() => router.push("/buy")} style={btnStyle("#1d4ed8")}>
+            Buy Time
           </button>
 
           {!isStreaming ? (
             <button
               onClick={startStreaming}
-              disabled={isLoading || !cameraReady}
+              disabled={isLoading || !cameraReady || !tokenInfo}
               style={{
                 ...btnStyle("#16a34a"),
-                opacity:
-                  isLoading || !cameraReady
-                    ? 0.5
-                    : 1,
-                cursor:
-                  isLoading || !cameraReady
-                    ? "not-allowed"
-                    : "pointer",
+                opacity: isLoading || !cameraReady || !tokenInfo ? 0.5 : 1,
+                cursor: isLoading || !cameraReady || !tokenInfo ? "not-allowed" : "pointer",
                 display: "flex",
                 alignItems: "center",
                 gap: "6px",
               }}
             >
               {isLoading && (
-                <span
-                  style={{
-                    width: "12px",
-                    height: "12px",
-                    border:
-                      "2px solid rgba(255,255,255,0.3)",
-                    borderTopColor: "#ffffff",
-                    borderRadius: "50%",
-                    display: "inline-block",
-                    animation: "spin 0.8s linear infinite",
-                  }}
-                />
+                <span style={{ width: "12px", height: "12px", border: "2px solid rgba(255,255,255,0.3)", borderTopColor: "#fff", borderRadius: "50%", display: "inline-block", animation: "spin 0.8s linear infinite" }} />
               )}
               {isLoading ? "Connecting..." : "▶ Start"}
             </button>
           ) : (
-            <button
-              onClick={stopStreaming}
-              style={btnStyle("#dc2626")}
-            >
-              ■ Stop
-            </button>
+            <button onClick={stopStreaming} style={btnStyle("#dc2626")}>■ Stop</button>
           )}
         </div>
       </div>
 
+      {/* Progress Bar */}
+      {tokenInfo && (
+        <div style={{ height: "3px", backgroundColor: "#1a1a1a", width: "100%" }}>
+          <div style={{
+            height: "100%",
+            width: `${progressPct}%`,
+            backgroundColor: progressPct > 85 ? "#ef4444" : progressPct > 60 ? "#f59e0b" : "#22c55e",
+            transition: "width 1s linear",
+          }} />
+        </div>
+      )}
+
       {/* CONTENT */}
-      <div
-        style={{
-          flex: 1,
-          display: "flex",
-          flexDirection: "column",
-          alignItems: "center",
-          padding: "24px 20px",
-          gap: "20px",
-        }}
-      >
-        {/* Camera Error */}
+      <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", padding: "24px 20px", gap: "20px" }}>
+
         {cameraError && (
-          <div
-            style={{
-              width: "100%",
-              maxWidth: "800px",
-              backgroundColor: "rgba(239,68,68,0.1)",
-              border: "1px solid rgba(239,68,68,0.4)",
-              borderRadius: "12px",
-              padding: "12px 16px",
-              display: "flex",
-              justifyContent: "space-between",
-              alignItems: "center",
-              gap: "12px",
-            }}
-          >
-            <p
-              style={{
-                color: "#fca5a5",
-                fontSize: "13px",
-                lineHeight: "1.5",
-              }}
-            >
-              {cameraError}
-            </p>
-            <button
-              onClick={acquireCamera}
-              style={{
-                ...btnStyle("#dc2626"),
-                whiteSpace: "nowrap",
-                flexShrink: 0,
-              }}
-            >
-              Retry
-            </button>
+          <div style={{ width: "100%", maxWidth: "800px", backgroundColor: "rgba(239,68,68,0.1)", border: "1px solid rgba(239,68,68,0.4)", borderRadius: "12px", padding: "12px 16px", display: "flex", justifyContent: "space-between", alignItems: "center", gap: "12px" }}>
+            <p style={{ color: "#fca5a5", fontSize: "13px" }}>{cameraError}</p>
+            <button onClick={acquireCamera} style={btnStyle("#dc2626")}>Retry</button>
           </div>
         )}
 
         {!cameraReady && !cameraError && (
-          <p
-            style={{
-              color: "#facc15",
-              fontSize: "13px",
-            }}
-          >
-            Initializing camera...
-          </p>
+          <p style={{ color: "#facc15", fontSize: "13px" }}>Initializing camera...</p>
         )}
 
-        {/* VIDEO */}
-        <div
-          style={{
-            width: "100%",
-            maxWidth: "800px",
-            backgroundColor: "#000000",
-            borderRadius: "16px",
-            overflow: "hidden",
-            border: "1px solid #222222",
-            boxShadow: "0 20px 60px rgba(0,0,0,0.8)",
-            aspectRatio: "16/9",
-          }}
-        >
-          <video
-            ref={videoRef}
-            autoPlay
-            playsInline
-            muted
-            style={{
-              width: "100%",
-              height: "100%",
-              objectFit: "cover",
-              display: "block",
-            }}
+        {/* VIDEO CONTAINER — canvas is the only visible output */}
+        <div style={{ width: "100%", maxWidth: "800px", backgroundColor: "#000", borderRadius: "16px", overflow: "hidden", border: "1px solid #222222", boxShadow: "0 20px 60px rgba(0,0,0,0.8)", aspectRatio: "16/9", position: "relative" }}>
+
+          {/* THE ONLY ELEMENT USER EVER SEES */}
+          <canvas
+            ref={displayCanvasRef}
+            width={1280}
+            height={720}
+            style={{ width: "100%", height: "100%", display: "block", backgroundColor: "#000" }}
           />
+
+          {isStreaming && (
+            <div style={{ position: "absolute", bottom: "12px", right: "12px", backgroundColor: "rgba(0,0,0,0.6)", borderRadius: "6px", padding: "4px 10px", fontSize: "11px", color: "#4ade80", fontFamily: "monospace", zIndex: 5 }}>
+              🔴 LIVE
+            </div>
+          )}
+
+          {isLoading && (
+            <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", zIndex: 5, backgroundColor: "rgba(0,0,0,0.4)" }}>
+              <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: "12px" }}>
+                <span style={{ width: "32px", height: "32px", border: "3px solid rgba(255,255,255,0.2)", borderTopColor: "#fff", borderRadius: "50%", display: "inline-block", animation: "spin 0.8s linear infinite" }} />
+                <span style={{ fontSize: "13px", color: "#9ca3af" }}>Connecting avatar...</span>
+              </div>
+            </div>
+          )}
         </div>
 
-        {/* REFERENCE IMAGE */}
-        <div
-          style={{
-            width: "100%",
-            maxWidth: "800px",
-            backgroundColor: "#111111",
-            border: "1px solid #222222",
-            borderRadius: "16px",
-            padding: "20px",
-          }}
-        >
-          <p
-            style={{
-              fontSize: "11px",
-              color: "#6b7280",
-              textTransform: "uppercase",
-              letterSpacing: "1px",
-              marginBottom: "14px",
-              fontWeight: "600",
-            }}
-          >
+        {/* Token Info Bar */}
+        {tokenInfo && (
+          <div style={{ width: "100%", maxWidth: "800px", backgroundColor: "#111111", border: "1px solid #222222", borderRadius: "12px", padding: "12px 16px", display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "8px" }}>
+            <div style={{ display: "flex", gap: "20px", flexWrap: "wrap" }}>
+              {[
+                { label: "TOKEN ID", value: tokenInfo.tokenId, color: "#9ca3af" },
+                { label: "TOTAL TIME", value: formatTime(totalSec), color: "#9ca3af" },
+                { label: "USED", value: formatTime(usedSeconds), color: "#facc15" },
+                { label: "REMAINING", value: formatTime(remainingSec), color: remainingSec < 120 ? "#f87171" : "#4ade80" },
+              ].map(item => (
+                <div key={item.label}>
+                  <p style={{ fontSize: "10px", color: "#4b5563", marginBottom: "2px" }}>{item.label}</p>
+                  <p style={{ fontSize: "11px", fontFamily: "monospace", color: item.color }}>{item.value}</p>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Reference Image */}
+        <div style={{ width: "100%", maxWidth: "800px", backgroundColor: "#111111", border: "1px solid #222222", borderRadius: "16px", padding: "20px" }}>
+          <p style={{ fontSize: "11px", color: "#6b7280", textTransform: "uppercase", letterSpacing: "1px", marginBottom: "14px", fontWeight: "600" }}>
             Reference Image
           </p>
-
-          <div
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: "16px",
-            }}
-          >
-            <div
-              style={{
-                width: "64px",
-                height: "64px",
-                borderRadius: "12px",
-                overflow: "hidden",
-                backgroundColor: "#1a1a1a",
-                border: "1px solid #2a2a2a",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                flexShrink: 0,
-              }}
-            >
+          <div style={{ display: "flex", alignItems: "center", gap: "16px" }}>
+            <div style={{ width: "64px", height: "64px", borderRadius: "12px", overflow: "hidden", backgroundColor: "#1a1a1a", border: "1px solid #2a2a2a", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
               {previewImage ? (
-                <img
-                  src={previewImage}
-                  alt="ref"
-                  style={{
-                    width: "100%",
-                    height: "100%",
-                    objectFit: "cover",
-                  }}
-                />
+                <img src={previewImage} alt="ref" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
               ) : (
-                <span
-                  style={{
-                    fontSize: "20px",
-                    opacity: 0.4,
-                  }}
-                >
-                  👤
-                </span>
+                <span style={{ fontSize: "20px", opacity: 0.4 }}>👤</span>
               )}
             </div>
-
-            <label
-              style={{
-                flex: 1,
-                backgroundColor: "#1a1a1a",
-                border: "1px dashed #333333",
-                borderRadius: "12px",
-                padding: "16px",
-                textAlign: "center",
-                cursor: "pointer",
-                color: "#9ca3af",
-                fontSize: "13px",
-                transition: "all 0.2s",
-                display: "block",
-              }}
-            >
-              {previewImage
-                ? "✅ Image loaded — click to change"
-                : "Click to upload reference image"}
+            <label style={{ flex: 1, backgroundColor: "#1a1a1a", border: "1px dashed #333", borderRadius: "12px", padding: "16px", textAlign: "center", cursor: "pointer", color: "#9ca3af", fontSize: "13px", display: "block" }}>
+              {previewImage ? "✅ Image loaded — click to change" : "Click to upload reference image"}
               <input
                 type="file"
                 accept="image/*"
                 style={{ display: "none" }}
-                onChange={(e) =>
-                  e.target.files &&
-                  handleImageUpload(e.target.files[0])
-                }
+                onChange={e => e.target.files && handleImageUpload(e.target.files[0])}
               />
             </label>
           </div>
-
-          <p
-            style={{
-              fontSize: "11px",
-              color: "#4b5563",
-              marginTop: "10px",
-            }}
-          >
-            Use a clear front-facing portrait for best
-            results.
+          <p style={{ fontSize: "11px", color: "#4b5563", marginTop: "10px" }}>
+            Use a clear front-facing portrait for best results.
           </p>
         </div>
       </div>
 
-      {/* SPIN ANIMATION */}
       <style>{`
-        @keyframes spin {
-          to { transform: rotate(360deg); }
-        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        @keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:0.4; } }
       `}</style>
 
-      {/* API KEY MODAL */}
-      {showApiModal && (
-        <div
-          style={{
-            position: "fixed",
-            inset: 0,
-            backgroundColor: "rgba(0,0,0,0.85)",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            zIndex: 50,
-            padding: "24px",
-          }}
-        >
-          <div
-            style={{
-              backgroundColor: "#111111",
-              border: "1px solid #2a2a2a",
-              borderRadius: "20px",
-              padding: "36px",
-              width: "100%",
-              maxWidth: "420px",
-              boxShadow:
-                "0 25px 60px rgba(0,0,0,0.8)",
-            }}
-          >
-            <h2
-              style={{
-                fontSize: "20px",
-                fontWeight: "700",
-                color: "#ffffff",
-                marginBottom: "6px",
-              }}
-            >
-              Enter API Key
+      {/* TOKEN MODAL */}
+      {showTokenModal && (
+        <div style={{ position: "fixed", inset: 0, backgroundColor: "rgba(0,0,0,0.85)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50, padding: "24px" }}>
+          <div style={{ backgroundColor: "#111111", border: "1px solid #2a2a2a", borderRadius: "20px", padding: "36px", width: "100%", maxWidth: "420px", boxShadow: "0 25px 60px rgba(0,0,0,0.8)" }}>
+            <h2 style={{ fontSize: "20px", fontWeight: "700", color: "#ffffff", marginBottom: "6px" }}>
+              Enter Streaming Token
             </h2>
-            <p
-              style={{
-                fontSize: "13px",
-                color: "#6b7280",
-                marginBottom: "20px",
-              }}
-            >
-              Paste your Decart API key to start.
+            <p style={{ fontSize: "13px", color: "#6b7280", marginBottom: "20px" }}>
+              Paste your streaming token to unlock your purchased time.
             </p>
-
             <input
               type="text"
-              placeholder="dct_api_..."
-              value={apiInput}
-              onChange={(e) =>
-                setApiInput(e.target.value)
-              }
-              onKeyDown={(e) =>
-                e.key === "Enter" && saveApiKey()
-              }
-              style={{
-                width: "100%",
-                padding: "13px 16px",
-                backgroundColor: "#1a1a1a",
-                border: "1px solid #2a2a2a",
-                borderRadius: "12px",
-                color: "#ffffff",
-                fontSize: "14px",
-                outline: "none",
-                display: "block",
-                marginBottom: "12px",
-              }}
+              placeholder="AVS-XXXXXXXX"
+              value={tokenInput}
+              onChange={e => setTokenInput(e.target.value)}
+              onKeyDown={e => e.key === "Enter" && saveToken()}
+              style={{ width: "100%", padding: "13px 16px", backgroundColor: "#1a1a1a", border: "1px solid #2a2a2a", borderRadius: "12px", color: "#ffffff", fontSize: "14px", outline: "none", display: "block", marginBottom: "12px", boxSizing: "border-box" }}
             />
-
             <button
-              onClick={saveApiKey}
-              style={{
-                width: "100%",
-                padding: "13px",
-                backgroundColor: "#2563eb",
-                border: "none",
-                borderRadius: "12px",
-                color: "#ffffff",
-                fontSize: "14px",
-                fontWeight: "600",
-                cursor: "pointer",
-                marginBottom: "8px",
-              }}
+              onClick={saveToken}
+              style={{ width: "100%", padding: "13px", backgroundColor: "#2563eb", border: "none", borderRadius: "12px", color: "#ffffff", fontSize: "14px", fontWeight: "600", cursor: "pointer", marginBottom: "8px" }}
             >
-              Save & Connect
+              Activate Token
             </button>
-
-            {apiKey && (
+            {tokenInfo && (
               <button
-                onClick={() => setShowApiModal(false)}
-                style={{
-                  width: "100%",
-                  padding: "11px",
-                  backgroundColor: "#1a1a1a",
-                  border: "1px solid #2a2a2a",
-                  borderRadius: "12px",
-                  color: "#9ca3af",
-                  fontSize: "13px",
-                  cursor: "pointer",
-                  marginBottom: "8px",
-                }}
+                onClick={() => setShowTokenModal(false)}
+                style={{ width: "100%", padding: "11px", backgroundColor: "#1a1a1a", border: "1px solid #2a2a2a", borderRadius: "12px", color: "#9ca3af", fontSize: "13px", cursor: "pointer", marginBottom: "8px" }}
               >
                 Cancel
               </button>
             )}
-
             <button
-              onClick={() => {
-                setShowApiModal(false);
-                router.push("/buy");
-              }}
-              style={{
-                width: "100%",
-                background: "none",
-                border: "none",
-                color: "#3b82f6",
-                fontSize: "13px",
-                cursor: "pointer",
-                padding: "8px",
-              }}
+              onClick={() => { setShowTokenModal(false); router.push("/buy"); }}
+              style={{ width: "100%", background: "none", border: "none", color: "#3b82f6", fontSize: "13px", cursor: "pointer", padding: "8px" }}
             >
-              Don't have a key? Buy one →
+              Don't have a token? Buy streaming time →
             </button>
           </div>
         </div>
@@ -682,94 +741,25 @@ No ghosting.
 
       {/* ERROR MODAL */}
       {showError && (
-        <div
-          style={{
-            position: "fixed",
-            inset: 0,
-            backgroundColor: "rgba(0,0,0,0.85)",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            zIndex: 50,
-            padding: "24px",
-          }}
-        >
-          <div
-            style={{
-              backgroundColor: "#111111",
-              border: "1px solid #7f1d1d",
-              borderRadius: "20px",
-              padding: "36px",
-              width: "100%",
-              maxWidth: "420px",
-              textAlign: "center",
-            }}
-          >
-            <div
-              style={{
-                fontSize: "40px",
-                marginBottom: "16px",
-              }}
-            >
-              ⚠️
-            </div>
-            <h2
-              style={{
-                fontSize: "18px",
-                fontWeight: "700",
-                marginBottom: "12px",
-              }}
-            >
-              Error
-            </h2>
-            <p
-              style={{
-                fontSize: "13px",
-                color: "#d1d5db",
-                lineHeight: "1.6",
-                marginBottom: "24px",
-                wordBreak: "break-word",
-              }}
-            >
+        <div style={{ position: "fixed", inset: 0, backgroundColor: "rgba(0,0,0,0.85)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50, padding: "24px" }}>
+          <div style={{ backgroundColor: "#111111", border: "1px solid #7f1d1d", borderRadius: "20px", padding: "36px", width: "100%", maxWidth: "420px", textAlign: "center" }}>
+            <div style={{ fontSize: "40px", marginBottom: "16px" }}>⚠️</div>
+            <h2 style={{ fontSize: "18px", fontWeight: "700", marginBottom: "12px" }}>Notice</h2>
+            <p style={{ fontSize: "13px", color: "#d1d5db", lineHeight: "1.6", marginBottom: "24px", wordBreak: "break-word" }}>
               {errorMsg}
             </p>
-            <div
-              style={{
-                display: "flex",
-                gap: "10px",
-                justifyContent: "center",
-              }}
-            >
+            <div style={{ display: "flex", gap: "10px", justifyContent: "center" }}>
               <button
                 onClick={() => setShowError(false)}
-                style={{
-                  padding: "10px 24px",
-                  backgroundColor: "#1f1f1f",
-                  border: "1px solid #333",
-                  borderRadius: "10px",
-                  color: "#ffffff",
-                  cursor: "pointer",
-                  fontSize: "13px",
-                }}
+                style={{ padding: "10px 24px", backgroundColor: "#1f1f1f", border: "1px solid #333", borderRadius: "10px", color: "#ffffff", cursor: "pointer", fontSize: "13px" }}
               >
                 OK
               </button>
               <button
-                onClick={() => {
-                  setShowError(false);
-                  router.push("/buy");
-                }}
-                style={{
-                  padding: "10px 24px",
-                  backgroundColor: "#2563eb",
-                  border: "none",
-                  borderRadius: "10px",
-                  color: "#ffffff",
-                  cursor: "pointer",
-                  fontSize: "13px",
-                }}
+                onClick={() => { setShowError(false); router.push("/buy"); }}
+                style={{ padding: "10px 24px", backgroundColor: "#2563eb", border: "none", borderRadius: "10px", color: "#ffffff", cursor: "pointer", fontSize: "13px" }}
               >
-                Buy API
+                Buy More Time
               </button>
             </div>
           </div>
@@ -777,23 +767,4 @@ No ghosting.
       )}
     </div>
   );
-}
-
-function btnStyle(
-  bg: string,
-  border?: string
-): React.CSSProperties {
-  return {
-    backgroundColor: bg,
-    border: border
-      ? `1px solid ${border}`
-      : "none",
-    borderRadius: "8px",
-    color: "#ffffff",
-    fontSize: "12px",
-    fontWeight: "500",
-    padding: "8px 14px",
-    cursor: "pointer",
-    whiteSpace: "nowrap",
-  };
 }

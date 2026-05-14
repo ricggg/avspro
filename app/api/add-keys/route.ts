@@ -11,23 +11,11 @@ export async function POST(req: Request) {
     const { keys } = await req.json();
 
     if (!keys) {
-      return NextResponse.json(
-        { error: "Missing keys" },
-        { status: 400 }
-      );
+      return NextResponse.json({ error: "Missing keys" }, { status: 400 });
     }
 
-    // Get existing keys to avoid duplicates — same logic as before
-    const existingAvailable = await redis.lrange(
-      "keys:available",
-      0,
-      -1
-    );
-    const existingUsed = await redis.lrange(
-      "keys:used",
-      0,
-      -1
-    );
+    const existingAvailable = await redis.lrange("keys:available", 0, -1);
+    const existingUsed = await redis.lrange("keys:used", 0, -1);
 
     const newKeys = (keys as string)
       .split(",")
@@ -40,25 +28,14 @@ export async function POST(req: Request) {
       );
 
     if (newKeys.length === 0) {
-      return NextResponse.json({
-        success: true,
-        added: 0,
-        message: "No new keys to add",
-      });
+      return NextResponse.json({ success: true, added: 0, message: "No new keys to add" });
     }
 
-    // Add all new keys to available list
     await redis.rpush("keys:available", ...newKeys);
 
-    return NextResponse.json({
-      success: true,
-      added: newKeys.length,
-    });
+    return NextResponse.json({ success: true, added: newKeys.length });
   } catch (error) {
     console.error("Add keys error:", error);
-    return NextResponse.json(
-      { error: "Internal server error" },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: "Internal server error" }, { status: 500 });
   }
 }

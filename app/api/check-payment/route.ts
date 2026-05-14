@@ -17,9 +17,7 @@ export async function POST(req: Request) {
       );
     }
 
-    const payment = await redis.hgetall(
-      `payment:${paymentId}`
-    );
+    const payment = await redis.hgetall(`payment:${paymentId}`);
 
     if (!payment) {
       return NextResponse.json(
@@ -28,8 +26,18 @@ export async function POST(req: Request) {
       );
     }
 
-    // Returns same shape as before: { id, crypto, status, apiKey }
-    return NextResponse.json(payment);
+    const rec = payment as any;
+
+    // Make sure streamingToken always has AVS- prefix
+    let streamingToken = rec.streamingToken || null;
+    if (streamingToken && !streamingToken.startsWith("AVS-")) {
+      streamingToken = "AVS-" + streamingToken;
+    }
+
+    return NextResponse.json({
+      ...rec,
+      streamingToken,
+    });
   } catch (error) {
     console.error("Check payment error:", error);
     return NextResponse.json(
