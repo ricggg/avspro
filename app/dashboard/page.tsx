@@ -5,6 +5,7 @@ import { createDecartClient, models } from "@decartai/sdk";
 import { useRouter } from "next/navigation";
 
 const KEY_DURATION_SECONDS = 492;
+const AVATAR_CONFIRM_FRAMES = 15;
 
 const stablePrompt = `
 Exact identity replication.
@@ -45,26 +46,26 @@ function btnStyle(bg: string, border?: string): React.CSSProperties {
 export default function Dashboard() {
   const router = useRouter();
 
-  // Raw cam — always display:none, user never sees this element directly
   const rawVideoRef = useRef<HTMLVideoElement>(null);
-
-  // Avatar stream — always display:none, feeds into canvas only
   const avatarVideoRef = useRef<HTMLVideoElement>(null);
-
-  // The ONLY thing user ever sees
   const displayCanvasRef = useRef<HTMLCanvasElement>(null);
-
-  // Avatar render loop (during streaming)
+  const hardOverlayRef = useRef<HTMLDivElement>(null);
+  const nuclearOverlayRef = useRef<HTMLDivElement>(null);
   const rafRef = useRef<number | null>(null);
-
-  // Raw cam render loop (before start and after stop)
   const rawDrawRafRef = useRef<number | null>(null);
-
-  // Last good avatar frame — always has something to show on network lag
   const lastGoodFrameRef = useRef<ImageData | null>(null);
-
+  const confirmedFramesRef = useRef(0);
+  const avatarConfirmedRef = useRef(false);
+  const avatarActiveRef = useRef(false);
+  const isStreamingRef = useRef(false);
+  const usedSecondsRef = useRef(0);
+  const currentKeyIndexRef = useRef(0);
+  const keyStartSecondRef = useRef(0);
+  const tokenInfoRef = useRef<TokenInfo | null>(null);
+  const switchingRef = useRef(false);
   const realtimeClientRef = useRef<any>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  const keyErrorCountRef = useRef<Record<number, number>>({});
 
   const [tokenInput, setTokenInput] = useState("");
   const [tokenInfo, setTokenInfo] = useState<TokenInfo | null>(null);
@@ -79,43 +80,80 @@ export default function Dashboard() {
   const [errorMsg, setErrorMsg] = useState("");
   const [showError, setShowError] = useState(false);
 
-  const isStreamingRef = useRef(false);
-  const usedSecondsRef = useRef(0);
-  const currentKeyIndexRef = useRef(0);
-  const keyStartSecondRef = useRef(0);
-  const tokenInfoRef = useRef<TokenInfo | null>(null);
-  const switchingRef = useRef(false);
-  const avatarActiveRef = useRef(false);
+  const hiddenVideoStyle: React.CSSProperties = {
+    display: "none",
+    visibility: "hidden",
+    opacity: 0,
+    position: "fixed",
+    top: "-99999px",
+    left: "-99999px",
+    width: "1px",
+    height: "1px",
+    pointerEvents: "none",
+    zIndex: -9999,
+  };
 
-  // ── Raw Cam Canvas Loop ──────────────────────────────────────────────────
-  // Used before start and after stop — draws raw cam through canvas safely
+  const showOverlays = useCallback(() => {
+    avatarConfirmedRef.current = false;
+    confirmedFramesRef.current = 0;
+    const hard = hardOverlayRef.current;
+    if (hard) {
+      hard.style.display = "flex";
+      hard.style.opacity = "1";
+      hard.style.pointerEvents = "all";
+    }
+    const nuclear = nuclearOverlayRef.current;
+    if (nuclear) {
+      nuclear.style.display = "flex";
+      nuclear.style.opacity = "1";
+      nuclear.style.pointerEvents = "all";
+    }
+  }, []);
+
+  const hideOverlays = useCallback(() => {
+    const hard = hardOverlayRef.current;
+    if (hard) {
+      hard.style.opacity = "0";
+      hard.style.pointerEvents = "none";
+      setTimeout(() => {
+        hard.style.display = "none";
+      }, 250);
+    }
+    const nuclear = nuclearOverlayRef.current;
+    if (nuclear) {
+      nuclear.style.opacity = "0";
+      nuclear.style.pointerEvents = "none";
+      setTimeout(() => {
+        nuclear.style.display = "none";
+      }, 250);
+    }
+  }, []);
+
   const startRawCamLoop = useCallback(() => {
-    // Cancel any existing raw loop first
     if (rawDrawRafRef.current) {
       cancelAnimationFrame(rawDrawRafRef.current);
       rawDrawRafRef.current = null;
     }
-
     const canvas = displayCanvasRef.current;
     const rawVideo = rawVideoRef.current;
     if (!canvas || !rawVideo) return;
-
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
     const drawRaw = () => {
-      // Stop if streaming started — avatar loop takes over
       if (isStreamingRef.current) return;
-
       if (rawVideo.readyState >= 2 && rawVideo.videoWidth > 0) {
-        canvas.width = rawVideo.videoWidth;
-        canvas.height = rawVideo.videoHeight;
+        if (
+          canvas.width !== rawVideo.videoWidth ||
+          canvas.height !== rawVideo.videoHeight
+        ) {
+          canvas.width = rawVideo.videoWidth;
+          canvas.height = rawVideo.videoHeight;
+        }
         ctx.drawImage(rawVideo, 0, 0, canvas.width, canvas.height);
       }
-
       rawDrawRafRef.current = requestAnimationFrame(drawRaw);
     };
-
     rawDrawRafRef.current = requestAnimationFrame(drawRaw);
   }, []);
 
@@ -126,15 +164,11 @@ export default function Dashboard() {
     }
   }, []);
 
-  // ── Avatar Canvas Render Loop ────────────────────────────────────────────
-  // Runs during streaming — only ever draws avatar frames
-  // On lag/switch — draws last good frame instead (never raw cam)
   const startRenderLoop = useCallback(() => {
     if (rafRef.current) {
       cancelAnimationFrame(rafRef.current);
       rafRef.current = null;
     }
-
     const canvas = displayCanvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext("2d");
@@ -144,34 +178,51 @@ export default function Dashboard() {
       if (!isStreamingRef.current) return;
 
       const avatarVideo = avatarVideoRef.current;
-
-      if (
+      const avatarHealthy =
         avatarActiveRef.current &&
-        avatarVideo &&
+        avatarVideo !== null &&
         avatarVideo.readyState >= 2 &&
         avatarVideo.videoWidth > 0 &&
         !avatarVideo.paused &&
-        !avatarVideo.ended
-      ) {
-        // Avatar is live and healthy — draw it
-        canvas.width = avatarVideo.videoWidth || 1280;
-        canvas.height = avatarVideo.videoHeight || 720;
+        !avatarVideo.ended;
+
+      if (avatarHealthy && avatarVideo) {
+        if (
+          canvas.width !== avatarVideo.videoWidth ||
+          canvas.height !== avatarVideo.videoHeight
+        ) {
+          canvas.width = avatarVideo.videoWidth || 1280;
+          canvas.height = avatarVideo.videoHeight || 720;
+        }
         ctx.drawImage(avatarVideo, 0, 0, canvas.width, canvas.height);
 
-        // Save as last good frame for lag/switch protection
         try {
           lastGoodFrameRef.current = ctx.getImageData(
             0, 0, canvas.width, canvas.height
           );
         } catch {}
 
+        confirmedFramesRef.current += 1;
+
+        if (
+          !avatarConfirmedRef.current &&
+          confirmedFramesRef.current >= AVATAR_CONFIRM_FRAMES &&
+          isStreamingRef.current
+        ) {
+          avatarConfirmedRef.current = true;
+          hideOverlays();
+        }
+
       } else if (lastGoodFrameRef.current) {
-        // Network lag / key switch / SDK reset
-        // Show last good avatar frame — raw cam has NO path here
         ctx.putImageData(lastGoodFrameRef.current, 0, 0);
 
+        if (avatarConfirmedRef.current && !avatarActiveRef.current) {
+          avatarConfirmedRef.current = false;
+          confirmedFramesRef.current = 0;
+          showOverlays();
+        }
+
       } else {
-        // No avatar frame captured yet — show black while connecting
         ctx.fillStyle = "#000000";
         ctx.fillRect(0, 0, canvas.width || 1280, canvas.height || 720);
       }
@@ -180,7 +231,7 @@ export default function Dashboard() {
     };
 
     rafRef.current = requestAnimationFrame(render);
-  }, []);
+  }, [hideOverlays, showOverlays]);
 
   const stopRenderLoop = useCallback(() => {
     if (rafRef.current) {
@@ -189,7 +240,6 @@ export default function Dashboard() {
     }
   }, []);
 
-  // ── Camera ───────────────────────────────────────────────────────────────
   const acquireCamera = async () => {
     setCameraError("");
     setCameraReady(false);
@@ -199,7 +249,6 @@ export default function Dashboard() {
       streamRef.current.getTracks().forEach(t => { try { t.stop(); } catch {} });
       streamRef.current = null;
     }
-
     if (rawVideoRef.current) rawVideoRef.current.srcObject = null;
 
     await new Promise(r => setTimeout(r, 600));
@@ -207,18 +256,12 @@ export default function Dashboard() {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ video: true });
       streamRef.current = stream;
-
-      // Raw cam → hidden video element only
       if (rawVideoRef.current) {
         rawVideoRef.current.srcObject = stream;
-        // Wait for video to be ready then start raw cam loop
         rawVideoRef.current.onloadedmetadata = () => {
-          if (!isStreamingRef.current) {
-            startRawCamLoop();
-          }
+          if (!isStreamingRef.current) startRawCamLoop();
         };
       }
-
       setCameraReady(true);
     } catch (err: any) {
       setCameraError(
@@ -236,53 +279,68 @@ export default function Dashboard() {
     };
   }, []);
 
-  // ── Token ────────────────────────────────────────────────────────────────
+  useEffect(() => {
+    if (!isStreaming) return;
+    const watchdog = setInterval(() => {
+      if (!isStreamingRef.current) return;
+      const avatarVideo = avatarVideoRef.current;
+      const avatarHealthy =
+        avatarActiveRef.current &&
+        avatarVideo !== null &&
+        avatarVideo.readyState >= 2 &&
+        avatarVideo.videoWidth > 0;
+      if (!avatarHealthy && avatarConfirmedRef.current) {
+        avatarConfirmedRef.current = false;
+        confirmedFramesRef.current = 0;
+        showOverlays();
+      }
+    }, 500);
+    return () => clearInterval(watchdog);
+  }, [isStreaming, showOverlays]);
+
   const saveToken = async () => {
     const raw = tokenInput.trim();
     if (!raw) { showErr("Please enter your streaming token."); return; }
-
     try {
       const res = await fetch("/api/validate-token", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ token: raw }),
       });
-
       const data = await res.json();
-
       if (!data.valid) {
         showErr(data.error || "Invalid or expired streaming token.");
         return;
       }
-
       const info: TokenInfo = data.tokenInfo;
-
       if (!info || !info.keys || info.keys.length === 0) {
         showErr("Token has no API keys assigned. Contact admin.");
         return;
       }
-
       setTokenInfo(info);
       tokenInfoRef.current = info;
       setUsedSeconds(info.usedSeconds);
       usedSecondsRef.current = info.usedSeconds;
       currentKeyIndexRef.current = 0;
+      keyErrorCountRef.current = {};
       setShowTokenModal(false);
-
     } catch {
       showErr("Token validation failed. Try again.");
     }
   };
 
-  // ── Connect With Key ─────────────────────────────────────────────────────
   const connectWithKey = async (keyIndex: number): Promise<boolean> => {
     const info = tokenInfoRef.current;
     if (!info || keyIndex >= info.keys.length) return false;
     if (!streamRef.current || !cameraReady) return false;
 
+    avatarActiveRef.current = false;
+    avatarConfirmedRef.current = false;
+    confirmedFramesRef.current = 0;
+
     try {
-      avatarActiveRef.current = false;
       const apiKey = info.keys[keyIndex];
+      console.log(`Connecting key index ${keyIndex}`);
 
       const client = createDecartClient({ apiKey });
       const realtimeClient = await client.realtime.connect(streamRef.current, {
@@ -290,14 +348,30 @@ export default function Dashboard() {
         onRemoteStream: (editedStream: MediaStream) => {
           if (!isStreamingRef.current) return;
 
-          // Feed avatar into hidden video — never shown directly
           if (avatarVideoRef.current) {
             avatarVideoRef.current.srcObject = editedStream;
             avatarVideoRef.current.play().catch(() => {});
           }
 
-          // Mark active — render loop now draws avatar instead of last frame
           avatarActiveRef.current = true;
+          avatarConfirmedRef.current = false;
+          confirmedFramesRef.current = 0;
+        },
+
+        onError: (error: any) => {
+          console.error("SDK onError:", error);
+          const msg = String(error?.message || error || "").toLowerCase();
+          const isCredit =
+            msg.includes("insufficient") ||
+            msg.includes("credits") ||
+            msg.includes("quota") ||
+            msg.includes("limit") ||
+            msg.includes("balance") ||
+            msg.includes("unauthorized");
+
+          if (isCredit && isStreamingRef.current && !switchingRef.current) {
+            handleCreditError();
+          }
         },
       });
 
@@ -308,32 +382,99 @@ export default function Dashboard() {
       }
 
       return true;
-    } catch (err) {
+    } catch (err: any) {
       console.error("connectWithKey error:", err);
+      const msg = String(err?.message || err || "").toLowerCase();
+      const isCredit =
+        msg.includes("insufficient") ||
+        msg.includes("credits") ||
+        msg.includes("quota") ||
+        msg.includes("limit") ||
+        msg.includes("balance");
+
+      if (isCredit) {
+        const nextIndex = keyIndex + 1;
+        const info = tokenInfoRef.current;
+        if (info && nextIndex < info.keys.length) {
+          await fetch("/api/mark-key-used", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ tokenId: info.tokenId, keyIndex }),
+          }).catch(() => {});
+          currentKeyIndexRef.current = nextIndex;
+          keyStartSecondRef.current = usedSecondsRef.current;
+          return connectWithKey(nextIndex);
+        }
+      }
       return false;
     }
   };
 
-  // ── Time Exhausted ───────────────────────────────────────────────────────
+  const handleCreditError = useCallback(async () => {
+    if (switchingRef.current) return;
+    switchingRef.current = true;
+
+    console.log("Credit error — rotating key immediately");
+
+    const info = tokenInfoRef.current;
+    if (!info) { switchingRef.current = false; return; }
+
+    const currentIndex = currentKeyIndexRef.current;
+    keyErrorCountRef.current[currentIndex] =
+      (keyErrorCountRef.current[currentIndex] || 0) + 1;
+
+    const nextIndex = currentIndex + 1;
+    if (nextIndex >= info.keys.length) {
+      switchingRef.current = false;
+      await handleTimeExhausted();
+      return;
+    }
+
+    showOverlays();
+    avatarActiveRef.current = false;
+
+    await fetch("/api/mark-key-used", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ tokenId: info.tokenId, keyIndex: currentIndex }),
+    }).catch(() => {});
+
+    try { await realtimeClientRef.current?.disconnect(); } catch {}
+    realtimeClientRef.current = null;
+    if (avatarVideoRef.current) avatarVideoRef.current.srcObject = null;
+
+    await new Promise(r => setTimeout(r, 300));
+
+    currentKeyIndexRef.current = nextIndex;
+    keyStartSecondRef.current = usedSecondsRef.current;
+
+    const success = await connectWithKey(nextIndex);
+    if (!success) await handleTimeExhausted();
+
+    switchingRef.current = false;
+  }, [showOverlays]);
+
   const handleTimeExhausted = async () => {
+    showOverlays();
     isStreamingRef.current = false;
     avatarActiveRef.current = false;
+    avatarConfirmedRef.current = false;
     stopRenderLoop();
     setIsStreaming(false);
 
     try { await realtimeClientRef.current?.disconnect(); } catch {}
     realtimeClientRef.current = null;
+    if (avatarVideoRef.current) avatarVideoRef.current.srcObject = null;
 
-    if (avatarVideoRef.current) {
-      avatarVideoRef.current.srcObject = null;
-    }
-
-    // Show last good avatar frame — frozen avatar on exhaustion
     const canvas = displayCanvasRef.current;
     if (canvas && lastGoodFrameRef.current) {
       const ctx = canvas.getContext("2d");
+      if (ctx) ctx.putImageData(lastGoodFrameRef.current, 0, 0);
+    } else if (canvas) {
+      const ctx = canvas.getContext("2d");
       if (ctx) {
-        ctx.putImageData(lastGoodFrameRef.current, 0, 0);
+        ctx.fillStyle = "#000000";
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
       }
     }
 
@@ -349,7 +490,6 @@ export default function Dashboard() {
     showErr("Your streaming time has been fully used. Purchase more time to continue.");
   };
 
-  // ── Key Rotation ─────────────────────────────────────────────────────────
   const rotateToNextKey = async () => {
     if (switchingRef.current) return;
     switchingRef.current = true;
@@ -358,14 +498,13 @@ export default function Dashboard() {
     if (!info) { switchingRef.current = false; return; }
 
     const nextIndex = currentKeyIndexRef.current + 1;
-
     if (nextIndex >= info.keys.length) {
       switchingRef.current = false;
       await handleTimeExhausted();
       return;
     }
 
-    // Mark avatar inactive — render loop shows last good frame during switch
+    showOverlays();
     avatarActiveRef.current = false;
 
     await fetch("/api/mark-key-used", {
@@ -379,10 +518,7 @@ export default function Dashboard() {
 
     try { await realtimeClientRef.current?.disconnect(); } catch {}
     realtimeClientRef.current = null;
-
-    if (avatarVideoRef.current) {
-      avatarVideoRef.current.srcObject = null;
-    }
+    if (avatarVideoRef.current) avatarVideoRef.current.srcObject = null;
 
     await new Promise(r => setTimeout(r, 400));
 
@@ -390,61 +526,54 @@ export default function Dashboard() {
     keyStartSecondRef.current = nextIndex * KEY_DURATION_SECONDS;
 
     const success = await connectWithKey(nextIndex);
-    if (!success) {
-      await handleTimeExhausted();
-    }
+    if (!success) await handleTimeExhausted();
 
     switchingRef.current = false;
   };
 
-  // ── Timer ────────────────────────────────────────────────────────────────
   useEffect(() => {
     if (!isStreaming) return;
-
     const interval = setInterval(async () => {
       if (!isStreamingRef.current) return;
-
       usedSecondsRef.current += 1;
       setUsedSeconds(usedSecondsRef.current);
-
       const info = tokenInfoRef.current;
       if (!info) return;
-
       if (usedSecondsRef.current >= info.totalSeconds) {
         clearInterval(interval);
         await handleTimeExhausted();
         return;
       }
-
       const keyElapsed = usedSecondsRef.current - keyStartSecondRef.current;
       if (keyElapsed >= KEY_DURATION_SECONDS && !switchingRef.current) {
         await rotateToNextKey();
       }
     }, 1000);
-
     return () => clearInterval(interval);
   }, [isStreaming]);
 
-  // ── Start ────────────────────────────────────────────────────────────────
   const startStreaming = async () => {
     if (!tokenInfo) { setShowTokenModal(true); return; }
     if (isStreaming || isLoading) return;
-    if (!streamRef.current || !cameraReady) { showErr("Camera not ready."); return; }
-
+    if (!streamRef.current || !cameraReady) {
+      showErr("Camera not ready.");
+      return;
+    }
     const remaining = tokenInfo.totalSeconds - usedSeconds;
     if (remaining <= 0) {
       showErr("No streaming time remaining. Please purchase more.");
       return;
     }
 
-    // Stop raw cam loop FIRST before anything else
+    showOverlays();
     stopRawCamLoop();
-
     setIsLoading(true);
 
-    // Clear last good frame so connecting shows black not stale avatar
     lastGoodFrameRef.current = null;
     avatarActiveRef.current = false;
+    avatarConfirmedRef.current = false;
+    confirmedFramesRef.current = 0;
+    keyErrorCountRef.current = {};
 
     const startIndex = Math.min(
       Math.floor(usedSeconds / KEY_DURATION_SECONDS),
@@ -454,7 +583,6 @@ export default function Dashboard() {
     keyStartSecondRef.current = startIndex * KEY_DURATION_SECONDS;
     isStreamingRef.current = true;
 
-    // Start avatar render loop — shows black until avatar arrives
     startRenderLoop();
 
     const success = await connectWithKey(startIndex);
@@ -467,28 +595,24 @@ export default function Dashboard() {
       avatarActiveRef.current = false;
       stopRenderLoop();
       setIsLoading(false);
-      // Failed — go back to showing raw cam
       startRawCamLoop();
-      showErr("Failed to connect. API key may be invalid or exhausted.");
+      avatarConfirmedRef.current = true;
+      hideOverlays();
+      showErr("Failed to connect. API key may be exhausted. Contact admin.");
     }
   };
 
-  // ── Stop ─────────────────────────────────────────────────────────────────
   const stopStreaming = async () => {
+    showOverlays();
     isStreamingRef.current = false;
     avatarActiveRef.current = false;
+    avatarConfirmedRef.current = false;
     setIsStreaming(false);
     stopRenderLoop();
 
     try { await realtimeClientRef.current?.disconnect(); } catch {}
     realtimeClientRef.current = null;
-
-    if (avatarVideoRef.current) {
-      avatarVideoRef.current.srcObject = null;
-    }
-
-    // After stop — show raw cam again through canvas safely
-    startRawCamLoop();
+    if (avatarVideoRef.current) avatarVideoRef.current.srcObject = null;
 
     await fetch("/api/update-token-usage", {
       method: "POST",
@@ -498,9 +622,12 @@ export default function Dashboard() {
         usedSeconds: usedSecondsRef.current,
       }),
     }).catch(() => {});
+
+    startRawCamLoop();
+    avatarConfirmedRef.current = true;
+    hideOverlays();
   };
 
-  // ── Image Upload ─────────────────────────────────────────────────────────
   const handleImageUpload = async (file: File) => {
     setLastAvatarFile(file);
     const reader = new FileReader();
@@ -518,31 +645,15 @@ export default function Dashboard() {
   const remainingSec = Math.max(0, totalSec - usedSeconds);
   const progressPct = totalSec > 0 ? (usedSeconds / totalSec) * 100 : 0;
 
-  // ── RENDER ───────────────────────────────────────────────────────────────
   return (
     <div style={{ minHeight: "100vh", backgroundColor: "#0a0a0a", color: "#ffffff", display: "flex", flexDirection: "column" }}>
 
-      {/* HIDDEN ELEMENTS — physically invisible, user can never see */}
-      <video
-        ref={rawVideoRef}
-        autoPlay
-        playsInline
-        muted
-        style={{ display: "none", position: "absolute", pointerEvents: "none" }}
-      />
-      <video
-        ref={avatarVideoRef}
-        autoPlay
-        playsInline
-        muted
-        style={{ display: "none", position: "absolute", pointerEvents: "none" }}
-      />
+      <video ref={rawVideoRef} autoPlay playsInline muted style={hiddenVideoStyle} />
+      <video ref={avatarVideoRef} autoPlay playsInline muted style={hiddenVideoStyle} />
 
       {/* TOP BAR */}
       <div style={{ backgroundColor: "#111111", borderBottom: "1px solid #222222", padding: "12px 20px", display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: "12px" }}>
-        <span style={{ fontSize: "16px", fontWeight: "700", color: "#ffffff" }}>
-          🎭 Avatar Studio Pro
-        </span>
+        <span style={{ fontSize: "16px", fontWeight: "700", color: "#ffffff" }}>🎭 Avatar Studio Pro</span>
 
         <div style={{ display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" }}>
           {tokenInfo && (
@@ -571,13 +682,12 @@ export default function Dashboard() {
             <button
               onClick={startStreaming}
               disabled={isLoading || !cameraReady || !tokenInfo}
+              suppressHydrationWarning
               style={{
                 ...btnStyle("#16a34a"),
                 opacity: isLoading || !cameraReady || !tokenInfo ? 0.5 : 1,
                 cursor: isLoading || !cameraReady || !tokenInfo ? "not-allowed" : "pointer",
-                display: "flex",
-                alignItems: "center",
-                gap: "6px",
+                display: "flex", alignItems: "center", gap: "6px",
               }}
             >
               {isLoading && (
@@ -617,10 +727,9 @@ export default function Dashboard() {
           <p style={{ color: "#facc15", fontSize: "13px" }}>Initializing camera...</p>
         )}
 
-        {/* VIDEO CONTAINER — canvas is the only visible output */}
+        {/* VIDEO CONTAINER */}
         <div style={{ width: "100%", maxWidth: "800px", backgroundColor: "#000", borderRadius: "16px", overflow: "hidden", border: "1px solid #222222", boxShadow: "0 20px 60px rgba(0,0,0,0.8)", aspectRatio: "16/9", position: "relative" }}>
 
-          {/* THE ONLY ELEMENT USER EVER SEES */}
           <canvas
             ref={displayCanvasRef}
             width={1280}
@@ -628,20 +737,44 @@ export default function Dashboard() {
             style={{ width: "100%", height: "100%", display: "block", backgroundColor: "#000" }}
           />
 
-          {isStreaming && (
-            <div style={{ position: "absolute", bottom: "12px", right: "12px", backgroundColor: "rgba(0,0,0,0.6)", borderRadius: "6px", padding: "4px 10px", fontSize: "11px", color: "#4ade80", fontFamily: "monospace", zIndex: 5 }}>
-              🔴 LIVE
-            </div>
-          )}
-
-          {isLoading && (
-            <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", zIndex: 5, backgroundColor: "rgba(0,0,0,0.4)" }}>
+          <div
+            ref={hardOverlayRef}
+            style={{
+              position: "absolute",
+              inset: 0,
+              backgroundColor: "#000000",
+              zIndex: 10,
+              display: "flex",
+              opacity: 1,
+              transition: "opacity 0.25s ease",
+              pointerEvents: "all",
+              alignItems: "center",
+              justifyContent: "center",
+            }}
+          >
+            {isLoading && (
               <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: "12px" }}>
-                <span style={{ width: "32px", height: "32px", border: "3px solid rgba(255,255,255,0.2)", borderTopColor: "#fff", borderRadius: "50%", display: "inline-block", animation: "spin 0.8s linear infinite" }} />
-                <span style={{ fontSize: "13px", color: "#9ca3af" }}>Connecting avatar...</span>
+                <span style={{ width: "32px", height: "32px", border: "3px solid rgba(255,255,255,0.15)", borderTopColor: "#ffffff", borderRadius: "50%", display: "inline-block", animation: "spin 0.8s linear infinite" }} />
+                <span style={{ fontSize: "13px", color: "#6b7280" }}>Connecting avatar...</span>
               </div>
-            </div>
-          )}
+            )}
+          </div>
+
+          <div
+            ref={nuclearOverlayRef}
+            style={{
+              position: "absolute",
+              inset: 0,
+              backgroundColor: "#000000",
+              zIndex: 11,
+              display: "flex",
+              opacity: 1,
+              transition: "opacity 0.25s ease",
+              pointerEvents: "all",
+              alignItems: "center",
+              justifyContent: "center",
+            }}
+          />
         </div>
 
         {/* Token Info Bar */}
@@ -701,9 +834,7 @@ export default function Dashboard() {
       {showTokenModal && (
         <div style={{ position: "fixed", inset: 0, backgroundColor: "rgba(0,0,0,0.85)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50, padding: "24px" }}>
           <div style={{ backgroundColor: "#111111", border: "1px solid #2a2a2a", borderRadius: "20px", padding: "36px", width: "100%", maxWidth: "420px", boxShadow: "0 25px 60px rgba(0,0,0,0.8)" }}>
-            <h2 style={{ fontSize: "20px", fontWeight: "700", color: "#ffffff", marginBottom: "6px" }}>
-              Enter Streaming Token
-            </h2>
+            <h2 style={{ fontSize: "20px", fontWeight: "700", color: "#ffffff", marginBottom: "6px" }}>Enter Streaming Token</h2>
             <p style={{ fontSize: "13px", color: "#6b7280", marginBottom: "20px" }}>
               Paste your streaming token to unlock your purchased time.
             </p>
@@ -715,24 +846,15 @@ export default function Dashboard() {
               onKeyDown={e => e.key === "Enter" && saveToken()}
               style={{ width: "100%", padding: "13px 16px", backgroundColor: "#1a1a1a", border: "1px solid #2a2a2a", borderRadius: "12px", color: "#ffffff", fontSize: "14px", outline: "none", display: "block", marginBottom: "12px", boxSizing: "border-box" }}
             />
-            <button
-              onClick={saveToken}
-              style={{ width: "100%", padding: "13px", backgroundColor: "#2563eb", border: "none", borderRadius: "12px", color: "#ffffff", fontSize: "14px", fontWeight: "600", cursor: "pointer", marginBottom: "8px" }}
-            >
+            <button onClick={saveToken} style={{ width: "100%", padding: "13px", backgroundColor: "#2563eb", border: "none", borderRadius: "12px", color: "#ffffff", fontSize: "14px", fontWeight: "600", cursor: "pointer", marginBottom: "8px" }}>
               Activate Token
             </button>
             {tokenInfo && (
-              <button
-                onClick={() => setShowTokenModal(false)}
-                style={{ width: "100%", padding: "11px", backgroundColor: "#1a1a1a", border: "1px solid #2a2a2a", borderRadius: "12px", color: "#9ca3af", fontSize: "13px", cursor: "pointer", marginBottom: "8px" }}
-              >
+              <button onClick={() => setShowTokenModal(false)} style={{ width: "100%", padding: "11px", backgroundColor: "#1a1a1a", border: "1px solid #2a2a2a", borderRadius: "12px", color: "#9ca3af", fontSize: "13px", cursor: "pointer", marginBottom: "8px" }}>
                 Cancel
               </button>
             )}
-            <button
-              onClick={() => { setShowTokenModal(false); router.push("/buy"); }}
-              style={{ width: "100%", background: "none", border: "none", color: "#3b82f6", fontSize: "13px", cursor: "pointer", padding: "8px" }}
-            >
+            <button onClick={() => { setShowTokenModal(false); router.push("/buy"); }} style={{ width: "100%", background: "none", border: "none", color: "#3b82f6", fontSize: "13px", cursor: "pointer", padding: "8px" }}>
               Don't have a token? Buy streaming time →
             </button>
           </div>
@@ -745,22 +867,10 @@ export default function Dashboard() {
           <div style={{ backgroundColor: "#111111", border: "1px solid #7f1d1d", borderRadius: "20px", padding: "36px", width: "100%", maxWidth: "420px", textAlign: "center" }}>
             <div style={{ fontSize: "40px", marginBottom: "16px" }}>⚠️</div>
             <h2 style={{ fontSize: "18px", fontWeight: "700", marginBottom: "12px" }}>Notice</h2>
-            <p style={{ fontSize: "13px", color: "#d1d5db", lineHeight: "1.6", marginBottom: "24px", wordBreak: "break-word" }}>
-              {errorMsg}
-            </p>
+            <p style={{ fontSize: "13px", color: "#d1d5db", lineHeight: "1.6", marginBottom: "24px", wordBreak: "break-word" }}>{errorMsg}</p>
             <div style={{ display: "flex", gap: "10px", justifyContent: "center" }}>
-              <button
-                onClick={() => setShowError(false)}
-                style={{ padding: "10px 24px", backgroundColor: "#1f1f1f", border: "1px solid #333", borderRadius: "10px", color: "#ffffff", cursor: "pointer", fontSize: "13px" }}
-              >
-                OK
-              </button>
-              <button
-                onClick={() => { setShowError(false); router.push("/buy"); }}
-                style={{ padding: "10px 24px", backgroundColor: "#2563eb", border: "none", borderRadius: "10px", color: "#ffffff", cursor: "pointer", fontSize: "13px" }}
-              >
-                Buy More Time
-              </button>
+              <button onClick={() => setShowError(false)} style={{ padding: "10px 24px", backgroundColor: "#1f1f1f", border: "1px solid #333", borderRadius: "10px", color: "#ffffff", cursor: "pointer", fontSize: "13px" }}>OK</button>
+              <button onClick={() => { setShowError(false); router.push("/buy"); }} style={{ padding: "10px 24px", backgroundColor: "#2563eb", border: "none", borderRadius: "10px", color: "#ffffff", cursor: "pointer", fontSize: "13px" }}>Buy More Time</button>
             </div>
           </div>
         </div>
