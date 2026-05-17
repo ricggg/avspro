@@ -11,10 +11,10 @@ const ADDRESSES: Record<string, string> = {
 
 const PACKAGES = [
   { minutes: 8,  price: "$15.00", label: "8 Minutes" },
-  { minutes: 16, price: "$35.00", label: "16 Minutes" },
-  { minutes: 24, price: "$50.00", label: "24 Minutes" },
-  { minutes: 32, price: "$65.00", label: "32 Minutes" },
-  { minutes: 40, price: "$90.00", label: "40 Minutes" },
+  { minutes: 16, price: "$28.00", label: "16 Minutes" },
+  { minutes: 24, price: "$42.00", label: "24 Minutes" },
+  { minutes: 32, price: "$56.00", label: "32 Minutes" },
+  { minutes: 40, price: "$70.00", label: "40 Minutes" },
 ];
 
 export default function BuyPage() {
