@@ -4,9 +4,9 @@ import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 
 const ADDRESSES: Record<string, string> = {
-  BTC: "bc1qrme2en6y0avreczqskpkzlwqsf60ae5u72wzvz",
-  SOL: "E9UXFiVL2LSq81aYFCbpe3gUjWSC6EE9BVUJZpPK4VvA",
-  USDT: "TUuQx2H4K7eNmQBKS5YUnZziAH7zR9atRH",
+  BTC: "bc1qh72lfxg3v6wwmzhyv9xzqpxexvstul4zt700rv",
+  SOL: "BoasH4LEhRchWD8zpt35FDuytgMJqKkKRKtawUT9j63J",
+  USDT: "TMi1gG4V4D3zqkTtAA4m6djYEKtdrjv9cr",
 };
 
 const PACKAGES = [
