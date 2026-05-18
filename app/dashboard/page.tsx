@@ -329,87 +329,7 @@ export default function Dashboard() {
     }
   };
 
-  const connectWithKey = async (keyIndex: number): Promise<boolean> => {
-    const info = tokenInfoRef.current;
-    if (!info || keyIndex >= info.keys.length) return false;
-    if (!streamRef.current || !cameraReady) return false;
-
-    avatarActiveRef.current = false;
-    avatarConfirmedRef.current = false;
-    confirmedFramesRef.current = 0;
-
-    try {
-      const apiKey = info.keys[keyIndex];
-      console.log(`Connecting key index ${keyIndex}`);
-
-      const client = createDecartClient({ apiKey });
-      const realtimeClient = await client.realtime.connect(streamRef.current, {
-        model: models.realtime("lucy-2.1"),
-        onRemoteStream: (editedStream: MediaStream) => {
-          if (!isStreamingRef.current) return;
-
-          if (avatarVideoRef.current) {
-            avatarVideoRef.current.srcObject = editedStream;
-            avatarVideoRef.current.play().catch(() => {});
-          }
-
-          avatarActiveRef.current = true;
-          avatarConfirmedRef.current = false;
-          confirmedFramesRef.current = 0;
-        },
-
-        onError: (error: any) => {
-          console.error("SDK onError:", error);
-          const msg = String(error?.message || error || "").toLowerCase();
-          const isCredit =
-            msg.includes("insufficient") ||
-            msg.includes("credits") ||
-            msg.includes("quota") ||
-            msg.includes("limit") ||
-            msg.includes("balance") ||
-            msg.includes("unauthorized");
-
-          if (isCredit && isStreamingRef.current && !switchingRef.current) {
-            handleCreditError();
-          }
-        },
-      });
-
-      realtimeClientRef.current = realtimeClient;
-
-      if (lastAvatarFile) {
-        await realtimeClient.set({ prompt: stablePrompt, image: lastAvatarFile });
-      }
-
-      return true;
-    } catch (err: any) {
-      console.error("connectWithKey error:", err);
-      const msg = String(err?.message || err || "").toLowerCase();
-      const isCredit =
-        msg.includes("insufficient") ||
-        msg.includes("credits") ||
-        msg.includes("quota") ||
-        msg.includes("limit") ||
-        msg.includes("balance");
-
-      if (isCredit) {
-        const nextIndex = keyIndex + 1;
-        const info = tokenInfoRef.current;
-        if (info && nextIndex < info.keys.length) {
-          await fetch("/api/mark-key-used", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ tokenId: info.tokenId, keyIndex }),
-          }).catch(() => {});
-          currentKeyIndexRef.current = nextIndex;
-          keyStartSecondRef.current = usedSecondsRef.current;
-          return connectWithKey(nextIndex);
-        }
-      }
-      return false;
-    }
-  };
-
+  // ─── handleCreditError declared before connectWithKey so it can be referenced ───
   const handleCreditError = useCallback(async () => {
     if (switchingRef.current) return;
     switchingRef.current = true;
@@ -452,7 +372,91 @@ export default function Dashboard() {
     if (!success) await handleTimeExhausted();
 
     switchingRef.current = false;
-  }, [showOverlays]);
+  }, [showOverlays]); // eslint-disable-line
+
+  const connectWithKey = async (keyIndex: number): Promise<boolean> => {
+    const info = tokenInfoRef.current;
+    if (!info || keyIndex >= info.keys.length) return false;
+    if (!streamRef.current || !cameraReady) return false;
+
+    avatarActiveRef.current = false;
+    avatarConfirmedRef.current = false;
+    confirmedFramesRef.current = 0;
+
+    try {
+      const apiKey = info.keys[keyIndex];
+      console.log(`Connecting key index ${keyIndex}`);
+
+      const client = createDecartClient({ apiKey });
+
+      // ✅ onError removed from connect options — attached separately below
+      const realtimeClient = await client.realtime.connect(streamRef.current, {
+        model: models.realtime("lucy-2.1"),
+        onRemoteStream: (editedStream: MediaStream) => {
+          if (!isStreamingRef.current) return;
+
+          if (avatarVideoRef.current) {
+            avatarVideoRef.current.srcObject = editedStream;
+            avatarVideoRef.current.play().catch(() => {});
+          }
+
+          avatarActiveRef.current = true;
+          avatarConfirmedRef.current = false;
+          confirmedFramesRef.current = 0;
+        },
+      });
+
+      // ✅ Error handling attached via event listener instead
+      realtimeClient.on("error", (error: any) => {
+        console.error("SDK onError:", error);
+        const msg = String(error?.message || error || "").toLowerCase();
+        const isCredit =
+          msg.includes("insufficient") ||
+          msg.includes("credits") ||
+          msg.includes("quota") ||
+          msg.includes("limit") ||
+          msg.includes("balance") ||
+          msg.includes("unauthorized");
+
+        if (isCredit && isStreamingRef.current && !switchingRef.current) {
+          handleCreditError();
+        }
+      });
+
+      realtimeClientRef.current = realtimeClient;
+
+      if (lastAvatarFile) {
+        await realtimeClient.set({ prompt: stablePrompt, image: lastAvatarFile });
+      }
+
+      return true;
+    } catch (err: any) {
+      console.error("connectWithKey error:", err);
+      const msg = String(err?.message || err || "").toLowerCase();
+      const isCredit =
+        msg.includes("insufficient") ||
+        msg.includes("credits") ||
+        msg.includes("quota") ||
+        msg.includes("limit") ||
+        msg.includes("balance");
+
+      if (isCredit) {
+        const nextIndex = keyIndex + 1;
+        const info = tokenInfoRef.current;
+        if (info && nextIndex < info.keys.length) {
+          await fetch("/api/mark-key-used", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ tokenId: info.tokenId, keyIndex }),
+          }).catch(() => {});
+          currentKeyIndexRef.current = nextIndex;
+          keyStartSecondRef.current = usedSecondsRef.current;
+          return connectWithKey(nextIndex);
+        }
+      }
+      return false;
+    }
+  };
 
   const handleTimeExhausted = async () => {
     showOverlays();
