@@ -203,7 +203,7 @@ export default function BuyPage() {
               Select Package
             </p>
 
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px", marginBottom: "20px" }}>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px", marginBottom: "16px" }}>
               {PACKAGES.map((pkg) => (
                 <button
                   key={pkg.minutes}
@@ -232,6 +232,44 @@ export default function BuyPage() {
                   </div>
                 </button>
               ))}
+            </div>
+
+            {/* Custom Credits Banner */}
+            <div style={{
+              backgroundColor: "rgba(124,58,237,0.08)",
+              border: "1px solid rgba(124,58,237,0.25)",
+              borderRadius: "12px",
+              padding: "12px 16px",
+              marginBottom: "20px",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              gap: "12px",
+              flexWrap: "wrap",
+            }}>
+              <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                <span style={{ fontSize: "16px" }}>✨</span>
+                <p style={{ fontSize: "13px", color: "#c4b5fd", fontWeight: "500", margin: 0 }}>
+                  Want more credits customized?
+                </p>
+              </div>
+              <a
+                href="mailto:support@avs.ai"
+                style={{
+                  fontSize: "12px",
+                  color: "#a78bfa",
+                  fontWeight: "700",
+                  textDecoration: "none",
+                  backgroundColor: "rgba(124,58,237,0.15)",
+                  border: "1px solid rgba(124,58,237,0.3)",
+                  borderRadius: "8px",
+                  padding: "5px 12px",
+                  whiteSpace: "nowrap",
+                  letterSpacing: "0.3px",
+                }}
+              >
+                Contact Support →
+              </a>
             </div>
 
             <p style={{ fontSize: "12px", color: "#6b7280", marginBottom: "8px", textTransform: "uppercase", letterSpacing: "1px" }}>
@@ -441,6 +479,30 @@ export default function BuyPage() {
             </div>
           </>
         )}
+
+        {/* Global Custom Credits Footer */}
+        <div style={{
+          marginTop: "28px",
+          paddingTop: "20px",
+          borderTop: "1px solid #1a1a1a",
+          textAlign: "center",
+        }}>
+          <p style={{ fontSize: "12px", color: "#4b5563", marginBottom: "6px" }}>
+            Want more credits customized?
+          </p>
+          <a
+            href="mailto:support@avs.ai"
+            style={{
+              fontSize: "13px",
+              color: "#818cf8",
+              fontWeight: "600",
+              textDecoration: "none",
+              letterSpacing: "0.3px",
+            }}
+          >
+            Contact Support — support@avs.ai
+          </a>
+        </div>
 
       </div>
 
